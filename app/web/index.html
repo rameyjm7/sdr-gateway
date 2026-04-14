@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SDR Viewer</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #121a2a;
+      --text: #d8e2ff;
+      --muted: #9aacd6;
+      --accent: #52d3a2;
+      --accent2: #5ea1ff;
+      --warn: #ff7961;
+      --grid: #293247;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color: var(--text);
+      background: radial-gradient(1000px 500px at 20% -10%, #1a2d4a, var(--bg));
+    }
+    .wrap {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid #24304a;
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+    }
+    label {
+      display: grid;
+      gap: 4px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    input, select, button {
+      width: 100%;
+      border-radius: 8px;
+      border: 1px solid #30405e;
+      background: #0e1524;
+      color: var(--text);
+      padding: 8px;
+      font-size: 14px;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    button {
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button.primary { background: #153b30; border-color: #286a56; color: #b9f5dd; }
+    button.secondary { background: #182740; border-color: #2c4e86; color: #c8dbff; }
+    button.danger { background: #3a1717; border-color: #804444; color: #ffd2d2; }
+    canvas {
+      width: 100%;
+      height: 420px;
+      border-radius: 10px;
+      border: 1px solid #2a3550;
+      background: #090f1b;
+      display: block;
+    }
+    .status {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: #c3d1f4;
+      font-size: 12px;
+      white-space: pre-wrap;
+    }
+    .pill {
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid #35527d;
+      color: #bdd3ff;
+      background: #152338;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <div class="row" style="justify-content:space-between; margin-bottom:10px;">
+        <strong>SDR Sweep Viewer</strong>
+        <span class="pill" id="state">idle</span>
+      </div>
+      <div class="grid">
+        <label>Device
+          <select id="device"></select>
+        </label>
+        <label>Center (MHz)
+          <input id="center" type="number" value="98.1" step="0.1" />
+        </label>
+        <label>Span (MHz)
+          <input id="span" type="number" value="2.0" step="0.1" min="0.1" />
+        </label>
+        <label>Bin Width (kHz)
+          <input id="bin" type="number" value="100" step="10" min="10" />
+        </label>
+        <label>LNA Gain (dB)
+          <input id="lna" type="number" value="40" step="8" min="0" max="40" />
+        </label>
+        <label>VGA Gain (dB)
+          <input id="vga" type="number" value="56" step="2" min="0" max="62" />
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <label style="display:flex;align-items:center;gap:6px;color:var(--muted)">
+          <input id="amp" type="checkbox" checked style="width:auto"/> Enable RF Amp
+        </label>
+        <button class="primary" id="start">Start Sweep</button>
+        <button class="danger" id="stop">Stop Sweep</button>
+        <button class="secondary" id="clear">Clear Persistence</button>
+        <button class="secondary" data-f="98.1">Tune 98.1</button>
+        <button class="secondary" data-f="751">Tune 751</button>
+        <button class="secondary" data-f="2402">Tune 2402</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <canvas id="plot" width="1600" height="480"></canvas>
+      <div class="status" id="status">loading...</div>
+    </div>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const stateEl = $("state");
+const statusEl = $("status");
+const canvas = $("plot");
+const ctx = canvas.getContext("2d");
+
+let sweepId = null;
+let pollHandle = null;
+let persistMax = null;
+
+function setState(text) {
+  stateEl.textContent = text;
+}
+
+function setStatus(text) {
+  statusEl.textContent = text;
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    headers: { "content-type": "application/json" },
+    ...opts,
+  });
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(`${r.status} ${r.statusText}: ${t}`);
+  }
+  return r.json();
+}
+
+function drawGrid() {
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.strokeStyle = "#293247";
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 10; i++) {
+    const x = (i / 10) * w;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+  }
+  for (let i = 0; i <= 8; i++) {
+    const y = (i / 8) * h;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+}
+
+function drawTrace(freqsMHz, avgDb, maxDb, yMin, yMax) {
+  const w = canvas.width;
+  const h = canvas.height;
+  const xMin = freqsMHz[0];
+  const xMax = freqsMHz[freqsMHz.length - 1];
+
+  const toX = (x) => ((x - xMin) / (xMax - xMin || 1)) * (w - 1);
+  const toY = (y) => h - ((y - yMin) / (yMax - yMin || 1)) * (h - 1);
+
+  drawGrid();
+
+  ctx.strokeStyle = "#5ea1ff";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < avgDb.length; i++) {
+    const x = toX(freqsMHz[i]);
+    const y = toY(avgDb[i]);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  ctx.strokeStyle = "#52d3a2";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  for (let i = 0; i < maxDb.length; i++) {
+    const x = toX(freqsMHz[i]);
+    const y = toY(maxDb[i]);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = "#d8e2ff";
+  ctx.font = "14px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillText(`Freq ${xMin.toFixed(3)} .. ${xMax.toFixed(3)} MHz`, 10, 20);
+  ctx.fillText(`Power ${yMin.toFixed(1)} .. ${yMax.toFixed(1)} dB`, 10, 40);
+  ctx.fillText("Blue: latest | Green: persistence max", 10, 60);
+}
+
+function makeFreqAxis(lowHz, highHz, n) {
+  const out = new Array(n);
+  const step = (highHz - lowHz) / Math.max(1, n);
+  for (let i = 0; i < n; i++) out[i] = (lowHz + i * step) / 1e6;
+  return out;
+}
+
+async function loadDevices() {
+  const devices = await api("/devices");
+  const sel = $("device");
+  sel.innerHTML = "";
+  for (const d of devices) {
+    const opt = document.createElement("option");
+    opt.value = d.id;
+    opt.textContent = `${d.id} | ${d.label} | ${Math.round(d.freq_min_hz / 1e6)}-${Math.round(d.freq_max_hz / 1e6)} MHz`;
+    sel.appendChild(opt);
+  }
+  if (devices.length === 0) {
+    throw new Error("No SDR devices found from /devices");
+  }
+}
+
+async function stopSweep() {
+  if (!sweepId) return;
+  const current = sweepId;
+  sweepId = null;
+  if (pollHandle) {
+    clearInterval(pollHandle);
+    pollHandle = null;
+  }
+  setState("stopping");
+  try {
+    await api(`/sweeps/${current}/stop`, { method: "POST", body: "{}" });
+  } catch (e) {
+    console.warn(e);
+  }
+  setState("idle");
+}
+
+async function startSweep() {
+  await stopSweep();
+
+  const centerMHz = Number($("center").value);
+  const spanMHz = Number($("span").value);
+  const startHz = Math.max(1_000_000, Math.round((centerMHz - spanMHz / 2) * 1e6));
+  const stopHz = Math.round((centerMHz + spanMHz / 2) * 1e6);
+
+  const payload = {
+    device_id: $("device").value,
+    start_freq_hz: startHz,
+    stop_freq_hz: stopHz,
+    bin_width_hz: Math.round(Number($("bin").value) * 1000),
+    lna_gain_db: Math.round(Number($("lna").value)),
+    vga_gain_db: Math.round(Number($("vga").value)),
+    amp_enable: $("amp").checked,
+  };
+
+  const resp = await api("/sweeps/start", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  sweepId = resp.sweep_id;
+  persistMax = null;
+  setState(`running ${sweepId.slice(0, 8)}`);
+
+  pollHandle = setInterval(async () => {
+    if (!sweepId) return;
+    try {
+      const samples = await api(`/sweeps/${sweepId}/samples`);
+      if (!samples.length) return;
+      const last = samples[samples.length - 1];
+      const avgDb = last.db_values;
+      if (!persistMax || persistMax.length !== avgDb.length) {
+        persistMax = avgDb.slice();
+      } else {
+        for (let i = 0; i < avgDb.length; i++) {
+          if (avgDb[i] > persistMax[i]) persistMax[i] = avgDb[i];
+        }
+      }
+
+      const freqsMHz = makeFreqAxis(last.hz_low, last.hz_high, avgDb.length);
+      const yFloor = Math.min(...avgDb, ...persistMax) - 3;
+      const yCeil = Math.max(...avgDb, ...persistMax) + 3;
+      drawTrace(freqsMHz, avgDb, persistMax, yFloor, yCeil);
+      setStatus(
+        `sweep_id=${sweepId}\n` +
+        `timestamp=${last.timestamp}\n` +
+        `freq=${(last.hz_low/1e6).toFixed(3)}..${(last.hz_high/1e6).toFixed(3)} MHz\n` +
+        `bins=${avgDb.length}`
+      );
+    } catch (err) {
+      setStatus(String(err));
+    }
+  }, 400);
+}
+
+function bindEvents() {
+  $("start").addEventListener("click", () => startSweep().catch((e) => setStatus(String(e))));
+  $("stop").addEventListener("click", () => stopSweep().catch((e) => setStatus(String(e))));
+  $("clear").addEventListener("click", () => { persistMax = null; setStatus("persistence cleared"); });
+  document.querySelectorAll("button[data-f]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      $("center").value = btn.dataset.f;
+    });
+  });
+  window.addEventListener("beforeunload", () => {
+    if (sweepId) navigator.sendBeacon(`/sweeps/${sweepId}/stop`, "{}");
+  });
+}
+
+(async function init() {
+  try {
+    drawGrid();
+    bindEvents();
+    await loadDevices();
+    setState("ready");
+    setStatus("ready: choose center/span and click Start Sweep");
+  } catch (e) {
+    setState("error");
+    setStatus(String(e));
+  }
+})();
+</script>
+</body>
+</html>
