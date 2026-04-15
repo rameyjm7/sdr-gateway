@@ -1,6 +1,6 @@
 # sdr-gateway
 
-Network SDR control service for local radios (HackRF today), with:
+Network SDR control service for local radios (HackRF + SoapySDR streaming for Sidekiq/Airspy/bladeRF/RTL-SDR), with:
 
 - Device discovery (`/devices`)
 - Start/stop IQ streaming (`/streams/*` + `/ws/iq/{stream_id}`)
@@ -10,13 +10,14 @@ Network SDR control service for local radios (HackRF today), with:
 
 ## Why this layout
 
-This keeps high-rate SDR I/O in native HackRF tools (`hackrf_transfer`, `hackrf_sweep`, both C-based)
+This keeps high-rate SDR I/O in native tools (`hackrf_transfer`, `hackrf_sweep`, SoapySDR drivers)
 while using Python/FastAPI for orchestration and remote control.
 
 ## Requirements
 
 - Python 3.10+
 - `hackrf-tools` installed on the SDR host (`hackrf_info`, `hackrf_transfer`, `hackrf_sweep`)
+- For Soapy radios (Sidekiq/Airspy/bladeRF/RTL-SDR): `SoapySDRUtil --find` must show matching drivers, and Python must import `SoapySDR`
 - Mock backend is disabled by default; enable with `SDR_ENABLE_MOCK=1` when needed.
 
 ## Run
@@ -120,3 +121,6 @@ curl -s http://localhost:8080/streams/start \
 - This scaffold has an optional mock backend (`mock:0`) for testing without hardware (`SDR_ENABLE_MOCK=1`).
 - For internet exposure, use HTTPS (reverse proxy), restrict firewall sources, and prefer WireGuard/Tailscale over open public ports.
 - Web viewer uses `hackrf_sweep` under the hood, so it is best for spectrum browsing/tuning.
+- Sidekiq streaming uses a SoapySDR worker (`driver=sidekiq`) and is exposed as `sidekiq:<index>` in `/devices`.
+- Airspy, bladeRF, and RTL-SDR streaming also use SoapySDR workers (`driver=airspy`, `driver=bladerf`, `driver=rtlsdr`) and are exposed as `airspy:<index>` / `bladerf:<index>` / `rtlsdr:<index>`.
+- Sweep mode is still HackRF-only.

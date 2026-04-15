@@ -33,6 +33,20 @@ class StreamManager:
         return self._sessions[stream_id]
 
     def start(self, config: StreamConfig) -> StreamSession:
+        device = next((d for d in self._registry.list_devices() if d.id == config.device_id), None)
+        if device is None:
+            raise KeyError(f"Unknown device_id '{config.device_id}'")
+        if not (device.freq_min_hz <= config.center_freq_hz <= device.freq_max_hz):
+            raise ValueError(
+                f"center_freq_hz {config.center_freq_hz} outside device range "
+                f"[{device.freq_min_hz}, {device.freq_max_hz}]"
+            )
+        if config.sample_rate_sps > device.max_sample_rate_sps:
+            raise ValueError(
+                f"sample_rate_sps {config.sample_rate_sps} exceeds device max "
+                f"{device.max_sample_rate_sps}"
+            )
+
         backend = self._registry.backend_for_device(config.device_id)
         process = backend.start_stream(
             StreamRequest(
@@ -43,6 +57,8 @@ class StreamManager:
                 vga_gain_db=config.vga_gain_db,
                 amp_enable=config.amp_enable,
                 baseband_filter_hz=config.baseband_filter_hz,
+                duration_seconds=config.duration_seconds,
+                num_samples=config.num_samples,
             )
         )
         stream_id = str(uuid.uuid4())

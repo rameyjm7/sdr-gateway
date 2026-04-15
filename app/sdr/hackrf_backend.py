@@ -17,13 +17,27 @@ def _cmd_available(command: str) -> bool:
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, check=False, capture_output=True, text=True)
+    # Some hackrf tools can emit non-UTF8 bytes in stderr/stdout on certain hosts.
+    # Decode defensively so device listing can't crash the API.
+    return subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
 
 
 def _parse_hackrf_serials(output: str) -> Iterable[str]:
     for line in output.splitlines():
         if "Serial Number:" in line:
             yield line.split("Serial Number:", 1)[1].strip()
+
+
+def _nearest_step(value: int, step: int, lo: int, hi: int) -> int:
+    clamped = min(max(value, lo), hi)
+    return int(round(clamped / step) * step)
 
 
 class HackRFBackend(SDRBackend):
@@ -65,6 +79,10 @@ class HackRFBackend(SDRBackend):
         if not _cmd_available("hackrf_transfer"):
             raise RuntimeError("hackrf_transfer not found in PATH")
 
+        # HackRF gain constraints: LNA in steps of 8 dB (0..40), VGA in steps of 2 dB (0..62).
+        lna = _nearest_step(request.lna_gain_db, step=8, lo=0, hi=40)
+        vga = _nearest_step(request.vga_gain_db, step=2, lo=0, hi=62)
+
         cmd = [
             "hackrf_transfer",
             "-r",
@@ -76,12 +94,18 @@ class HackRFBackend(SDRBackend):
             "-a",
             "1" if request.amp_enable else "0",
             "-l",
-            str(request.lna_gain_db),
+            str(lna),
             "-g",
-            str(request.vga_gain_db),
+            str(vga),
         ]
         if request.baseband_filter_hz:
             cmd.extend(["-b", str(request.baseband_filter_hz)])
+        # Support finite captures: explicit num_samples wins, else derive from duration.
+        num_samples = request.num_samples
+        if num_samples is None and request.duration_seconds:
+            num_samples = int(request.duration_seconds * request.sample_rate_sps)
+        if num_samples:
+            cmd.extend(["-n", str(num_samples)])
 
         # stdout carries raw interleaved int8 IQ bytes.
         return subprocess.Popen(
@@ -128,6 +152,8 @@ class HackRFBackend(SDRBackend):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
         )
 

@@ -1,1 +1,1 @@
-# sdr-server package
+# sdr-gateway package

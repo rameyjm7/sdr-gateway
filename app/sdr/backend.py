@@ -25,6 +25,8 @@ class StreamRequest:
     vga_gain_db: int
     amp_enable: bool
     baseband_filter_hz: int | None
+    duration_seconds: int | None
+    num_samples: int | None
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,5 @@
 [project]
-name = "sdr-server"
+name = "sdr-gateway"
 version = "0.1.0"
 description = "Network SDR control and IQ streaming service"
 readme = "README.md"
