@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.auth import auth_enabled, require_http_auth, require_ws_auth
 from app.models import DeviceInfo, StreamConfig, StreamState, SweepConfig, SweepSample, SweepState
 from app.sdr.registry import BackendRegistry
 from app.services import StreamManager, SweepManager
@@ -30,17 +31,22 @@ def web_index():
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "auth_enabled": auth_enabled()}
+
+
+@app.get("/auth/verify")
+def verify_auth(_: None = Depends(require_http_auth)):
+    return {"ok": True, "auth_enabled": auth_enabled()}
 
 
 @app.get("/devices", response_model=list[DeviceInfo])
-def list_devices():
+def list_devices(_: None = Depends(require_http_auth)):
     devices = registry.list_devices()
     return [DeviceInfo(**d.__dict__) for d in devices]
 
 
 @app.post("/streams/start", response_model=StreamState)
-def start_stream(config: StreamConfig):
+def start_stream(config: StreamConfig, _: None = Depends(require_http_auth)):
     try:
         session = stream_manager.start(config)
     except KeyError as exc:
@@ -52,7 +58,7 @@ def start_stream(config: StreamConfig):
 
 
 @app.post("/streams/{stream_id}/stop")
-def stop_stream(stream_id: str):
+def stop_stream(stream_id: str, _: None = Depends(require_http_auth)):
     try:
         stream_manager.stop(stream_id)
     except KeyError as exc:
@@ -61,12 +67,14 @@ def stop_stream(stream_id: str):
 
 
 @app.get("/streams", response_model=list[StreamState])
-def list_streams():
+def list_streams(_: None = Depends(require_http_auth)):
     return [StreamState(stream_id=s.id, status=s.status, config=s.config) for s in stream_manager.list_states()]
 
 
 @app.websocket("/ws/iq/{stream_id}")
 async def iq_stream(stream_id: str, websocket: WebSocket):
+    if not await require_ws_auth(websocket):
+        return
     try:
         stream_manager.get(stream_id)
     except KeyError as exc:
@@ -90,7 +98,7 @@ async def iq_stream(stream_id: str, websocket: WebSocket):
 
 
 @app.post("/sweeps/start", response_model=SweepState)
-def start_sweep(config: SweepConfig):
+def start_sweep(config: SweepConfig, _: None = Depends(require_http_auth)):
     try:
         session = sweep_manager.start(config)
     except KeyError as exc:
@@ -102,7 +110,7 @@ def start_sweep(config: SweepConfig):
 
 
 @app.post("/sweeps/{sweep_id}/stop")
-def stop_sweep(sweep_id: str):
+def stop_sweep(sweep_id: str, _: None = Depends(require_http_auth)):
     try:
         sweep_manager.stop(sweep_id)
     except KeyError as exc:
@@ -111,12 +119,12 @@ def stop_sweep(sweep_id: str):
 
 
 @app.get("/sweeps", response_model=list[SweepState])
-def list_sweeps():
+def list_sweeps(_: None = Depends(require_http_auth)):
     return [SweepState(sweep_id=s.id, status=s.status, config=s.config) for s in sweep_manager.list_states()]
 
 
 @app.get("/sweeps/{sweep_id}/samples", response_model=list[SweepSample])
-def sweep_samples(sweep_id: str):
+def sweep_samples(sweep_id: str, _: None = Depends(require_http_auth)):
     try:
         samples = sweep_manager.recent_samples(sweep_id)
     except KeyError as exc:

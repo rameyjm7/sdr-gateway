@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 import urllib.request
 import websockets
 
 API = "http://127.0.0.1:8080"
 WS_BASE = "ws://127.0.0.1:8080"
+API_TOKEN = os.getenv("SDR_GATEWAY_API_TOKEN", "").strip()
 
 
 def post_json(path: str, payload: dict):
     data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if API_TOKEN:
+        headers["Authorization"] = f"Bearer {API_TOKEN}"
     req = urllib.request.Request(
         f"{API}{path}",
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
@@ -38,7 +43,10 @@ async def main():
     print("Started stream", stream_id)
 
     total = 0
-    async with websockets.connect(f"{WS_BASE}/ws/iq/{stream_id}") as ws:
+    ws_url = f"{WS_BASE}/ws/iq/{stream_id}"
+    if API_TOKEN:
+        ws_url = f"{ws_url}?token={API_TOKEN}"
+    async with websockets.connect(ws_url) as ws:
         for _ in range(20):
             chunk = await ws.recv()
             total += len(chunk)

@@ -1,4 +1,4 @@
-# sdr-server
+# sdr-gateway
 
 Network SDR control service for local radios (HackRF today), with:
 
@@ -22,7 +22,7 @@ while using Python/FastAPI for orchestration and remote control.
 ## Run
 
 ```bash
-cd /home/jake/workspace/SDR/sdr-server
+cd /home/jake/workspace/SDR/sdr-gateway
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -32,6 +32,61 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
 Then open:
 
 - `http://localhost:8080/`
+- `http://localhost:8080/docs` (Swagger)
+- `http://localhost:8080/openapi.json`
+
+## Run as system service (systemd)
+
+Use the helper script:
+
+```bash
+cd /home/jake/workspace/SDR/sdr-gateway
+scripts/sdr-gateway-service.sh install
+scripts/sdr-gateway-service.sh enable
+scripts/sdr-gateway-service.sh start
+```
+
+Install with auth token (recommended):
+
+```bash
+cd /home/jake/workspace/SDR/sdr-gateway
+export SDR_GATEWAY_API_TOKEN="$(openssl rand -base64 48)"
+scripts/sdr-gateway-service.sh install
+scripts/sdr-gateway-service.sh enable
+scripts/sdr-gateway-service.sh start
+```
+
+The install helper writes `SDR_GATEWAY_API_TOKEN` to `/etc/default/sdr-gateway` by default.
+
+Stop/restart/status:
+
+```bash
+scripts/sdr-gateway-service.sh stop
+scripts/sdr-gateway-service.sh restart
+scripts/sdr-gateway-service.sh status
+```
+
+Optional overrides (example):
+
+```bash
+SDR_GATEWAY_PORT=8090 SDR_GATEWAY_HOST=127.0.0.1 \
+  scripts/sdr-gateway-service.sh install
+```
+
+## Authentication
+
+When `SDR_GATEWAY_API_TOKEN` is set, all API and websocket endpoints require auth.
+
+- HTTP: `Authorization: Bearer <token>` (or `X-API-Key: <token>`)
+- WebSocket: `ws://.../ws/iq/{id}?token=<token>` (or bearer header)
+- Web UI (`/`) includes a token field and stores it in browser localStorage.
+
+Verify auth:
+
+```bash
+curl -s http://localhost:8080/auth/verify \
+  -H "Authorization: Bearer $SDR_GATEWAY_API_TOKEN"
+```
 
 ## Core API
 
@@ -63,5 +118,5 @@ curl -s http://localhost:8080/streams/start \
 
 - IQ format over websocket is raw interleaved signed 8-bit bytes: `I,Q,I,Q,...`
 - This scaffold has an optional mock backend (`mock:0`) for testing without hardware (`SDR_ENABLE_MOCK=1`).
-- For internet exposure, put this behind WireGuard/Tailscale instead of open ports.
+- For internet exposure, use HTTPS (reverse proxy), restrict firewall sources, and prefer WireGuard/Tailscale over open public ports.
 - Web viewer uses `hackrf_sweep` under the hood, so it is best for spectrum browsing/tuning.
