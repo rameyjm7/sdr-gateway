@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 import time
 import uuid
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -74,7 +75,7 @@ tx_manager = TxManager(registry)
 if WEB_DIR.exists():
     app.mount("/web", StaticFiles(directory=WEB_DIR), name="web")
 
-ERROR_RESPONSES = {
+ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {
         "model": ErrorResponse,
         "description": "Bad request",

@@ -21,7 +21,7 @@ class _FakeSession:
 
 class _FakeStreamManager:
     def __init__(self) -> None:
-        self._sessions = {}
+        self._sessions: dict[str, _FakeSession] = {}
 
     def start(self, config: StreamConfig):
         session = _FakeSession("stream-1", config)
@@ -42,7 +42,7 @@ class _FakeStreamManager:
 
 class _FakeTxManager:
     def __init__(self) -> None:
-        self._sessions = {}
+        self._sessions: dict[str, _FakeSession] = {}
 
     def start(self, config: TxBurstConfig):
         session = _FakeSession("tx-1", config)

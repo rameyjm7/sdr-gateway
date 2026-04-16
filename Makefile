@@ -1,4 +1,4 @@
-PYTHON ?= .venv/bin/python
+PYTHON ?= python3
 REPORTS_DIR ?= reports
 
 .PHONY: install-dev lint type test test-unit test-hardware test-junit ci

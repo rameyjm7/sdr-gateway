@@ -8,22 +8,34 @@ import threading
 import uuid
 from collections import deque
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 from app.models import StreamConfig, SweepConfig, TxBurstConfig
-from app.sdr.backend import StreamRequest, SweepRequest, TxBurstRequest
-from app.sdr.registry import BackendRegistry
+from app.sdr.backend import Device, StreamRequest, SweepRequest, TxBurstRequest
+
+
+class ManagedProcess(Protocol):
+    stdout: Any | None
+
+    def poll(self) -> int | None: ...
+
+
+class RegistryLike(Protocol):
+    def list_devices(self) -> list[Device]: ...
+
+    def backend_for_device(self, device_id: str) -> Any: ...
 
 
 @dataclass
 class StreamSession:
     id: str
     config: StreamConfig
-    process: object
+    process: ManagedProcess
     status: str = "running"
 
 
 class StreamManager:
-    def __init__(self, registry: BackendRegistry) -> None:
+    def __init__(self, registry: RegistryLike) -> None:
         self._registry = registry
         self._sessions: dict[str, StreamSession] = {}
 
@@ -93,14 +105,14 @@ class StreamManager:
 class SweepSession:
     id: str
     config: SweepConfig
-    process: object
+    process: ManagedProcess
     status: str = "running"
-    samples: deque = None
-    _stop: threading.Event = None
+    samples: deque[dict[str, Any]] | None = None
+    _stop: threading.Event | None = None
 
 
 class SweepManager:
-    def __init__(self, registry: BackendRegistry) -> None:
+    def __init__(self, registry: RegistryLike) -> None:
         self._registry = registry
         self._sessions: dict[str, SweepSession] = {}
 
@@ -139,7 +151,8 @@ class SweepManager:
 
     def stop(self, sweep_id: str) -> None:
         session = self._sessions[sweep_id]
-        session._stop.set()
+        if session._stop is not None:
+            session._stop.set()
         backend = self._registry.backend_for_device(session.config.device_id)
         backend.stop_sweep(session.process)
         session.status = "stopped"
@@ -153,14 +166,19 @@ class SweepManager:
                 continue
 
     def recent_samples(self, sweep_id: str):
-        return list(self._sessions[sweep_id].samples)
+        samples = self._sessions[sweep_id].samples
+        return list(samples) if samples is not None else []
 
     def _collect_sweep_output(self, session: SweepSession) -> None:
         stdout = session.process.stdout
         if stdout is None:
             return
+        stop_event = session._stop
+        sample_buffer = session.samples
+        if stop_event is None or sample_buffer is None:
+            return
 
-        while not session._stop.is_set():
+        while not stop_event.is_set():
             line = stdout.readline()
             if not line:
                 if session.process.poll() is not None:
@@ -169,7 +187,7 @@ class SweepManager:
 
             parsed = self._parse_sweep_line(line)
             if parsed:
-                session.samples.append(parsed)
+                sample_buffer.append(parsed)
 
     @staticmethod
     def _parse_sweep_line(line: str) -> dict | None:
@@ -193,13 +211,13 @@ class SweepManager:
 class TxSession:
     id: str
     config: TxBurstConfig
-    process: object
+    process: ManagedProcess
     status: str = "running"
     returncode: int | None = None
 
 
 class TxManager:
-    def __init__(self, registry: BackendRegistry) -> None:
+    def __init__(self, registry: RegistryLike) -> None:
         self._registry = registry
         self._sessions: dict[str, TxSession] = {}
 

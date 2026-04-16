@@ -22,7 +22,7 @@ class _FakeProcess:
 class _FakeBackend:
     def __init__(self) -> None:
         self.last_request = None
-        self.stopped = []
+        self.stopped: list[object] = []
         self.process = _FakeProcess(None)
 
     def start_tx_burst(self, request):

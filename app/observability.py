@@ -5,11 +5,12 @@ import logging
 import threading
 import time
 from collections import Counter
+from typing import Any
 
 
 class JsonLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        payload = {
+        payload: dict[str, Any] = {
             "ts": self.formatTime(record, self.datefmt),
             "level": record.levelname,
             "logger": record.name,
@@ -37,13 +38,16 @@ def configure_logging(level: str, json_logs: bool) -> None:
     root = logging.getLogger()
     root.setLevel(level)
     if not root.handlers:
-        handler = logging.StreamHandler()
-        root.addHandler(handler)
+        default_handler = logging.StreamHandler()
+        root.addHandler(default_handler)
     for handler in root.handlers:
+        stream_handler = handler if isinstance(handler, logging.StreamHandler) else None
+        if stream_handler is None:
+            continue
         if json_logs:
-            handler.setFormatter(JsonLogFormatter())
+            stream_handler.setFormatter(JsonLogFormatter())
         else:
-            handler.setFormatter(
+            stream_handler.setFormatter(
                 logging.Formatter(
                     "%(asctime)s %(levelname)s %(name)s [%(request_id)s] %(message)s",
                     defaults={"request_id": "-"},
