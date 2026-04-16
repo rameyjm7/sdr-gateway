@@ -46,15 +46,19 @@ class HackRFBackend(SDRBackend):
             return []
 
         info = _run(["hackrf_info"])
-        if info.returncode != 0:
-            return []
-
         # Some hackrf_info builds write details to stderr; parse both streams.
         merged_output = f"{info.stdout}\n{info.stderr}"
+        # "No HackRF boards found" is definitive; keep list empty.
+        if "No HackRF boards found" in merged_output:
+            return []
+
         serials = list(_parse_hackrf_serials(merged_output))
-        if not serials:
-            # hackrf_info can fail to print serial on some versions; keep a generic entry.
+        if not serials and ("Found HackRF" in merged_output or info.returncode == 0):
+            # Some host/tooling combos fail to print serial reliably (or exit non-zero
+            # despite detecting a device). Keep a generic entry so UI can still select it.
             serials = [None]
+        elif not serials:
+            return []
 
         devices = []
         for idx, serial in enumerate(serials):

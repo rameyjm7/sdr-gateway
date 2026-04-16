@@ -188,7 +188,7 @@ def main() -> int:
 
             # Convert CS16 IQ to int8 IQ expected by current gateway clients.
             iq16 = rx_buf[: n * 2]
-            iq8 = np.right_shift(iq16, 8).astype(np.int8, copy=False)
+            iq8 = np.clip(np.rint(iq16.astype(np.float32) / 64.0), -128, 127).astype(np.int8, copy=False)
             out.write(iq8.tobytes())
             produced_samples += n
     finally:
