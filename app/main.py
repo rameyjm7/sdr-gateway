@@ -7,9 +7,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.auth import auth_enabled, require_http_auth, require_ws_auth
-from app.models import DeviceInfo, StreamConfig, StreamState, SweepConfig, SweepSample, SweepState
+from app.models import DeviceInfo, StreamConfig, StreamState, SweepConfig, SweepSample, SweepState, TxBurstConfig, TxState
 from app.sdr.registry import BackendRegistry
-from app.services import StreamManager, SweepManager
+from app.services import StreamManager, SweepManager, TxManager
 
 app = FastAPI(title="SDR Server", version="0.1.0")
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -17,6 +17,7 @@ WEB_DIR = Path(__file__).resolve().parent / "web"
 registry = BackendRegistry()
 stream_manager = StreamManager(registry)
 sweep_manager = SweepManager(registry)
+tx_manager = TxManager(registry)
 
 if WEB_DIR.exists():
     app.mount("/web", StaticFiles(directory=WEB_DIR), name="web")
@@ -130,3 +131,32 @@ def sweep_samples(sweep_id: str, _: None = Depends(require_http_auth)):
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown sweep_id {sweep_id}") from exc
     return [SweepSample(**s) for s in samples]
+
+
+@app.post("/tx/start", response_model=TxState)
+def start_tx(config: TxBurstConfig, _: None = Depends(require_http_auth)):
+    try:
+        session = tx_manager.start(config)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return TxState(tx_id=session.id, status=session.status, config=session.config, returncode=session.returncode)
+
+
+@app.post("/tx/{tx_id}/stop")
+def stop_tx(tx_id: str, _: None = Depends(require_http_auth)):
+    try:
+        tx_manager.stop(tx_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown tx_id {tx_id}") from exc
+    return {"ok": True}
+
+
+@app.get("/tx", response_model=list[TxState])
+def list_tx(_: None = Depends(require_http_auth)):
+    return [
+        TxState(tx_id=s.id, status=s.status, config=s.config, returncode=s.returncode)
+        for s in tx_manager.list_states()
+    ]

@@ -54,3 +54,23 @@ class SweepSample(BaseModel):
     hz_low: int
     hz_high: int
     db_values: list[float]
+
+
+class TxBurstConfig(BaseModel):
+    device_id: str = Field(description="Device identifier from /devices")
+    center_freq_hz: int = Field(ge=1_000_000, le=6_000_000_000)
+    sample_rate_sps: int = Field(ge=200_000, le=61_440_000)
+    tx_gain_db: int = Field(default=20, ge=0, le=62)
+    amp_enable: bool = False
+    baseband_filter_hz: int | None = Field(default=None, ge=200_000, le=61_440_000)
+    # Base64-encoded interleaved int8 IQ bytes (I,Q,I,Q...).
+    iq_i8_b64: str = Field(min_length=4)
+    repeat: int = Field(default=1, ge=1, le=1024)
+    timeout_seconds: int = Field(default=30, ge=1, le=300)
+
+
+class TxState(BaseModel):
+    tx_id: str
+    status: str
+    config: TxBurstConfig
+    returncode: int | None = None

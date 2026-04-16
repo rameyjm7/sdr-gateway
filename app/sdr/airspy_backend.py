@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from app.sdr.backend import Device, SDRBackend, StreamRequest, SweepRequest
+from app.sdr.backend import Device, SDRBackend, StreamRequest, SweepRequest, TxBurstRequest
 from app.sdr.soapy_utils import find_driver_devices
 
 
@@ -89,5 +89,12 @@ class AirspyBackend(SDRBackend):
         raise RuntimeError("Airspy sweep backend is not implemented in sdr-gateway yet.")
 
     def stop_sweep(self, process) -> None:
+        if process is None:
+            return
+
+    def start_tx_burst(self, request: TxBurstRequest):
+        raise RuntimeError("TX is not supported for Airspy devices.")
+
+    def stop_tx_burst(self, process) -> None:
         if process is None:
             return

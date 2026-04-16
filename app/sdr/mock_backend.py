@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-from app.sdr.backend import Device, SDRBackend, StreamRequest, SweepRequest
+from app.sdr.backend import Device, SDRBackend, StreamRequest, SweepRequest, TxBurstRequest
 
 
 class MockBackend(SDRBackend):
@@ -49,3 +49,10 @@ class MockBackend(SDRBackend):
     def stop_sweep(self, process) -> None:
         if process.poll() is None:
             process.terminate()
+
+    def start_tx_burst(self, request: TxBurstRequest):
+        raise RuntimeError("TX is not supported for mock backend.")
+
+    def stop_tx_burst(self, process) -> None:
+        if process is None:
+            return

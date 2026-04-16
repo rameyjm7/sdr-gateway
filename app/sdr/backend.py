@@ -40,6 +40,19 @@ class SweepRequest:
     amp_enable: bool
 
 
+@dataclass(frozen=True)
+class TxBurstRequest:
+    device_id: str
+    center_freq_hz: int
+    sample_rate_sps: int
+    tx_gain_db: int
+    amp_enable: bool
+    baseband_filter_hz: int | None
+    iq_i8: bytes
+    repeat: int
+    timeout_seconds: int
+
+
 class SDRBackend(Protocol):
     def list_devices(self) -> list[Device]: ...
 
@@ -50,3 +63,7 @@ class SDRBackend(Protocol):
     def start_sweep(self, request: SweepRequest): ...
 
     def stop_sweep(self, process) -> None: ...
+
+    def start_tx_burst(self, request: TxBurstRequest): ...
+
+    def stop_tx_burst(self, process) -> None: ...

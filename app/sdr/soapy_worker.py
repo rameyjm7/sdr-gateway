@@ -10,7 +10,7 @@ import numpy as np
 
 try:
     import SoapySDR  # type: ignore
-    from SoapySDR import SOAPY_SDR_CS16, SOAPY_SDR_RX  # type: ignore
+    from SoapySDR import SOAPY_SDR_CS16, SOAPY_SDR_RX, SOAPY_SDR_TX  # type: ignore
 except Exception as exc:  # pragma: no cover - runtime dependency
     # Fallback when running inside a venv but SoapySDR Python bindings were
     # installed into /usr/local system site-packages.
@@ -20,7 +20,7 @@ except Exception as exc:  # pragma: no cover - runtime dependency
         sys.path.append(str(fallback))
     try:
         import SoapySDR  # type: ignore
-        from SoapySDR import SOAPY_SDR_CS16, SOAPY_SDR_RX  # type: ignore
+        from SoapySDR import SOAPY_SDR_CS16, SOAPY_SDR_RX, SOAPY_SDR_TX  # type: ignore
     except Exception:
         print(f"SoapySDR import failed: {exc}", file=sys.stderr)
         print(f"PYTHONPATH={os.getenv('PYTHONPATH', '')}", file=sys.stderr)
@@ -29,6 +29,7 @@ except Exception as exc:  # pragma: no cover - runtime dependency
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Generic Soapy IQ streaming worker (stdout int8 IQ).")
+    p.add_argument("--mode", choices=("rx", "tx"), default="rx")
     p.add_argument("--driver", required=True)
     p.add_argument("--device-index", type=int, default=0)
     p.add_argument("--center-freq-hz", type=int, required=True)
@@ -38,6 +39,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--vga-gain-db", type=int, default=0)
     p.add_argument("--duration-seconds", type=int, default=0)
     p.add_argument("--num-samples", type=int, default=0)
+    p.add_argument("--tx-gain-db", type=int, default=20)
+    p.add_argument("--iq-file", type=str, default="")
+    p.add_argument("--repeat", type=int, default=1)
+    p.add_argument("--timeout-seconds", type=int, default=30)
     return p.parse_args()
 
 
@@ -66,23 +71,29 @@ def _range_bounds(rng, default_min: float, default_max: float) -> tuple[float, f
     return float(default_min), float(default_max)
 
 
-def _clip_gain(dev, name: str | None, value: float) -> float:
+def _clip_gain(dev, direction: int, name: str | None, value: float) -> float:
     try:
         if name:
-            lo, hi = _range_bounds(dev.getGainRange(SOAPY_SDR_RX, 0, name), 0.0, 76.0)
+            lo, hi = _range_bounds(dev.getGainRange(direction, 0, name), 0.0, 76.0)
         else:
-            lo, hi = _range_bounds(dev.getGainRange(SOAPY_SDR_RX, 0), 0.0, 76.0)
+            lo, hi = _range_bounds(dev.getGainRange(direction, 0), 0.0, 76.0)
     except Exception:
         lo, hi = 0.0, 76.0
     return float(min(max(value, lo), hi))
 
 
-def _set_named_gain(dev, element_names: dict[str, str], preferred: str, value: float) -> bool:
+def _set_named_gain(
+    dev,
+    direction: int,
+    element_names: dict[str, str],
+    preferred: str,
+    value: float,
+) -> bool:
     actual = element_names.get(preferred.lower())
     if not actual:
         return False
     try:
-        dev.setGain(SOAPY_SDR_RX, 0, actual, _clip_gain(dev, actual, value))
+        dev.setGain(direction, 0, actual, _clip_gain(dev, direction, actual, value))
         return True
     except Exception:
         return False
@@ -107,45 +118,70 @@ def _apply_driver_gain(dev, driver: str, lna_gain_db: int, vga_gain_db: int) -> 
 
     if driver == "rtlsdr":
         # SoapyRTLSDR usually exposes only one effective receive gain element.
-        if _set_named_gain(dev, element_names, "tuner", total):
+        if _set_named_gain(dev, SOAPY_SDR_RX, element_names, "tuner", total):
             return
-        if _set_named_gain(dev, element_names, "lna", total):
+        if _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", total):
             return
     elif driver == "airspy":
         # Airspy commonly exposes LNA/MIX/VGA controls.
         set_any = False
-        set_any = _set_named_gain(dev, element_names, "lna", float(lna_gain_db)) or set_any
-        set_any = _set_named_gain(dev, element_names, "mix", float(vga_gain_db)) or set_any
-        set_any = _set_named_gain(dev, element_names, "vga", float(vga_gain_db)) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", float(lna_gain_db)) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "mix", float(vga_gain_db)) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "vga", float(vga_gain_db)) or set_any
         if set_any:
             return
     elif driver == "bladerf":
         # bladeRF can expose total gain and/or staged gains.
         set_any = False
-        set_any = _set_named_gain(dev, element_names, "lna", float(lna_gain_db)) or set_any
-        set_any = _set_named_gain(dev, element_names, "vga1", float(vga_gain_db) * 0.5) or set_any
-        set_any = _set_named_gain(dev, element_names, "vga2", float(vga_gain_db) * 0.5) or set_any
-        set_any = _set_named_gain(dev, element_names, "rxvga1", float(vga_gain_db) * 0.5) or set_any
-        set_any = _set_named_gain(dev, element_names, "rxvga2", float(vga_gain_db) * 0.5) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", float(lna_gain_db)) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "vga1", float(vga_gain_db) * 0.5) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "vga2", float(vga_gain_db) * 0.5) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "rxvga1", float(vga_gain_db) * 0.5) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "rxvga2", float(vga_gain_db) * 0.5) or set_any
         if set_any:
             return
     elif driver == "sidekiq":
         # Sidekiq plugins may expose a narrow or fixed gain range.
-        if _set_named_gain(dev, element_names, "lna", float(lna_gain_db)):
+        if _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", float(lna_gain_db)):
             return
 
     # Fallback to aggregate receive gain when named controls are unavailable.
     try:
-        dev.setGain(SOAPY_SDR_RX, 0, _clip_gain(dev, None, total))
+        dev.setGain(SOAPY_SDR_RX, 0, _clip_gain(dev, SOAPY_SDR_RX, None, total))
     except Exception:
         pass
 
 
-def main() -> int:
-    args = _parse_args()
-    kwargs = _select_device_kwargs(args.driver, args.device_index)
-    dev = SoapySDR.Device(kwargs)
+def _apply_tx_gain(dev, driver: str, tx_gain_db: int) -> None:
+    driver = (driver or "").lower()
+    total = float(tx_gain_db)
+    try:
+        names = list(dev.listGains(SOAPY_SDR_TX, 0))
+    except Exception:
+        names = []
+    element_names = {n.lower(): n for n in names}
 
+    if driver == "bladerf":
+        # bladeRF TX chains may expose PA/VGA controls by name.
+        set_any = False
+        set_any = _set_named_gain(dev, SOAPY_SDR_TX, element_names, "pa", total) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_TX, element_names, "vga1", total * 0.5) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_TX, element_names, "vga2", total * 0.5) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_TX, element_names, "txvga1", total * 0.5) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_TX, element_names, "txvga2", total * 0.5) or set_any
+        if set_any:
+            return
+    elif driver == "sidekiq":
+        if _set_named_gain(dev, SOAPY_SDR_TX, element_names, "tx", total):
+            return
+
+    try:
+        dev.setGain(SOAPY_SDR_TX, 0, _clip_gain(dev, SOAPY_SDR_TX, None, total))
+    except Exception:
+        pass
+
+
+def _run_rx(dev, args: argparse.Namespace) -> int:
     dev.setFrequency(SOAPY_SDR_RX, 0, float(args.center_freq_hz))
     dev.setSampleRate(SOAPY_SDR_RX, 0, float(args.sample_rate_sps))
     if args.baseband_filter_hz and args.baseband_filter_hz > 0:
@@ -201,6 +237,72 @@ def main() -> int:
         except Exception:
             pass
     return 0
+
+
+def _run_tx(dev, args: argparse.Namespace) -> int:
+    if not args.iq_file:
+        raise RuntimeError("--iq-file is required in tx mode")
+    payload = Path(args.iq_file).read_bytes()
+    if len(payload) < 2:
+        raise RuntimeError("TX IQ payload is too small")
+    if len(payload) % 2 != 0:
+        payload = payload[:-1]
+
+    dev.setFrequency(SOAPY_SDR_TX, 0, float(args.center_freq_hz))
+    dev.setSampleRate(SOAPY_SDR_TX, 0, float(args.sample_rate_sps))
+    if args.baseband_filter_hz and args.baseband_filter_hz > 0:
+        try:
+            dev.setBandwidth(SOAPY_SDR_TX, 0, float(args.baseband_filter_hz))
+        except Exception:
+            pass
+    _apply_tx_gain(dev, args.driver, int(args.tx_gain_db))
+
+    stream = dev.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CS16)
+    dev.activateStream(stream)
+
+    iq8 = np.frombuffer(payload, dtype=np.int8)
+    iq16 = (iq8.astype(np.int16) * 256).astype(np.int16, copy=False)
+    num_samples = int(iq16.size // 2)
+    if num_samples <= 0:
+        raise RuntimeError("No TX IQ samples")
+
+    repeats = max(1, int(args.repeat))
+    deadline = time.time() + max(1, int(args.timeout_seconds))
+
+    try:
+        for _ in range(repeats):
+            if time.time() > deadline:
+                break
+            sent = 0
+            while sent < num_samples:
+                if time.time() > deadline:
+                    break
+                start = sent * 2
+                segment = iq16[start:]
+                result = dev.writeStream(stream, [segment], num_samples - sent, timeoutUs=500_000)
+                n = int(getattr(result, "ret", result))
+                if n <= 0:
+                    continue
+                sent += n
+    finally:
+        try:
+            dev.deactivateStream(stream)
+        except Exception:
+            pass
+        try:
+            dev.closeStream(stream)
+        except Exception:
+            pass
+    return 0
+
+
+def main() -> int:
+    args = _parse_args()
+    kwargs = _select_device_kwargs(args.driver, args.device_index)
+    dev = SoapySDR.Device(kwargs)
+    if args.mode == "tx":
+        return _run_tx(dev, args)
+    return _run_rx(dev, args)
 
 
 if __name__ == "__main__":

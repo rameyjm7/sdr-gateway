@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
 import io
 import threading
@@ -8,8 +9,8 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 
-from app.models import StreamConfig, SweepConfig
-from app.sdr.backend import StreamRequest, SweepRequest
+from app.models import StreamConfig, SweepConfig, TxBurstConfig
+from app.sdr.backend import StreamRequest, SweepRequest, TxBurstRequest
 from app.sdr.registry import BackendRegistry
 
 
@@ -172,3 +173,85 @@ class SweepManager:
             }
         except Exception:
             return None
+
+
+@dataclass
+class TxSession:
+    id: str
+    config: TxBurstConfig
+    process: object
+    status: str = "running"
+    returncode: int | None = None
+
+
+class TxManager:
+    def __init__(self, registry: BackendRegistry) -> None:
+        self._registry = registry
+        self._sessions: dict[str, TxSession] = {}
+
+    def _refresh(self) -> None:
+        for session in self._sessions.values():
+            if session.status == "running":
+                rc = session.process.poll()
+                if rc is not None:
+                    session.status = "completed" if rc == 0 else "failed"
+                    session.returncode = int(rc)
+
+    def list_states(self):
+        self._refresh()
+        return list(self._sessions.values())
+
+    def get(self, tx_id: str) -> TxSession:
+        self._refresh()
+        return self._sessions[tx_id]
+
+    def start(self, config: TxBurstConfig) -> TxSession:
+        device = next((d for d in self._registry.list_devices() if d.id == config.device_id), None)
+        if device is None:
+            raise KeyError(f"Unknown device_id '{config.device_id}'")
+        if not (device.freq_min_hz <= config.center_freq_hz <= device.freq_max_hz):
+            raise ValueError(
+                f"center_freq_hz {config.center_freq_hz} outside device range "
+                f"[{device.freq_min_hz}, {device.freq_max_hz}]"
+            )
+        if config.sample_rate_sps > device.max_sample_rate_sps:
+            raise ValueError(
+                f"sample_rate_sps {config.sample_rate_sps} exceeds device max "
+                f"{device.max_sample_rate_sps}"
+            )
+
+        try:
+            iq_i8 = base64.b64decode(config.iq_i8_b64.encode("ascii"), validate=True)
+        except Exception as exc:
+            raise ValueError("iq_i8_b64 must be valid base64") from exc
+        if len(iq_i8) < 2:
+            raise ValueError("iq_i8_b64 payload too small")
+        if len(iq_i8) % 2 != 0:
+            iq_i8 = iq_i8[:-1]
+
+        backend = self._registry.backend_for_device(config.device_id)
+        process = backend.start_tx_burst(
+            TxBurstRequest(
+                device_id=config.device_id,
+                center_freq_hz=config.center_freq_hz,
+                sample_rate_sps=config.sample_rate_sps,
+                tx_gain_db=config.tx_gain_db,
+                amp_enable=config.amp_enable,
+                baseband_filter_hz=config.baseband_filter_hz,
+                iq_i8=iq_i8,
+                repeat=config.repeat,
+                timeout_seconds=config.timeout_seconds,
+            )
+        )
+        tx_id = str(uuid.uuid4())
+        session = TxSession(id=tx_id, config=config, process=process)
+        self._sessions[tx_id] = session
+        return session
+
+    def stop(self, tx_id: str) -> None:
+        session = self._sessions[tx_id]
+        backend = self._registry.backend_for_device(session.config.device_id)
+        backend.stop_tx_burst(session.process)
+        session.returncode = session.process.poll()
+        session.status = "stopped"
+        del self._sessions[tx_id]

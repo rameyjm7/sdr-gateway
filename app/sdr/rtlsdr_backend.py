@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from app.sdr.backend import Device, SDRBackend, StreamRequest, SweepRequest
+from app.sdr.backend import Device, SDRBackend, StreamRequest, SweepRequest, TxBurstRequest
 from app.sdr.soapy_utils import find_driver_devices
 
 
@@ -93,5 +93,12 @@ class RTLSDRBackend(SDRBackend):
         raise RuntimeError("RTL-SDR sweep backend is not implemented in sdr-gateway yet.")
 
     def stop_sweep(self, process) -> None:
+        if process is None:
+            return
+
+    def start_tx_burst(self, request: TxBurstRequest):
+        raise RuntimeError("TX is not supported for RTL-SDR devices.")
+
+    def stop_tx_burst(self, process) -> None:
         if process is None:
             return

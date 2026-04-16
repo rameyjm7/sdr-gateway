@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import tempfile
 from typing import Iterable
 
-from app.sdr.backend import Device, SDRBackend, StreamRequest, SweepRequest
+from app.sdr.backend import Device, SDRBackend, StreamRequest, SweepRequest, TxBurstRequest
 
 
 HACKRF_FREQ_MIN = 1_000_000
@@ -34,16 +36,52 @@ def _parse_hackrf_serials(output: str) -> Iterable[str]:
         if "Serial Number:" in line:
             yield line.split("Serial Number:", 1)[1].strip()
 
+def _count_hackrf_lsusb() -> int:
+    if not _cmd_available("lsusb"):
+        return 0
+    result = _run(["lsusb"])
+    if result.returncode != 0:
+        return 0
+    merged_output = f"{result.stdout}\n{result.stderr}"
+    # HackRF VID:PID
+    return sum(1 for line in merged_output.splitlines() if "1d50:6089" in line.lower())
+
 
 def _nearest_step(value: int, step: int, lo: int, hi: int) -> int:
     clamped = min(max(value, lo), hi)
     return int(round(clamped / step) * step)
 
 
+def _cleanup_tx_file(process: object) -> None:
+    tx_file = getattr(process, "_tx_iq_path", None)
+    if not tx_file:
+        return
+    try:
+        os.unlink(tx_file)
+    except OSError:
+        pass
+
+
 class HackRFBackend(SDRBackend):
     def list_devices(self) -> list[Device]:
         if not _cmd_available("hackrf_info"):
-            return []
+            usb_count = _count_hackrf_lsusb()
+            if usb_count <= 0:
+                return []
+            serials: list[str | None] = [None] * usb_count
+            return [
+                Device(
+                    id=f"hackrf:{idx}",
+                    driver="hackrf",
+                    label="HackRF One",
+                    serial=serial,
+                    freq_min_hz=HACKRF_FREQ_MIN,
+                    freq_max_hz=HACKRF_FREQ_MAX,
+                    max_sample_rate_sps=HACKRF_MAX_SAMPLE_RATE,
+                    notes="8-bit I/Q (CS8), USB 2.0; practical stable rates depend on host.",
+                )
+                for idx, serial in enumerate(serials)
+            ]
 
         info = _run(["hackrf_info"])
         # Some hackrf_info builds write details to stderr; parse both streams.
@@ -58,7 +96,11 @@ class HackRFBackend(SDRBackend):
             # despite detecting a device). Keep a generic entry so UI can still select it.
             serials = [None]
         elif not serials:
-            return []
+            usb_count = _count_hackrf_lsusb()
+            if usb_count > 0:
+                serials = [None] * usb_count
+            else:
+                return []
 
         devices = []
         for idx, serial in enumerate(serials):
@@ -168,3 +210,51 @@ class HackRFBackend(SDRBackend):
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 process.kill()
+
+    def start_tx_burst(self, request: TxBurstRequest):
+        if not _cmd_available("hackrf_transfer"):
+            raise RuntimeError("hackrf_transfer not found in PATH")
+
+        tx_gain = min(max(int(request.tx_gain_db), 0), 47)
+
+        payload = request.iq_i8 * max(1, int(request.repeat))
+        fd, path = tempfile.mkstemp(prefix="sdr_gateway_tx_", suffix=".iq")
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+
+        cmd = [
+            "hackrf_transfer",
+            "-t",
+            path,
+            "-f",
+            str(request.center_freq_hz),
+            "-s",
+            str(request.sample_rate_sps),
+            "-a",
+            "1" if request.amp_enable else "0",
+            "-x",
+            str(tx_gain),
+        ]
+        if request.baseband_filter_hz:
+            cmd.extend(["-b", str(request.baseband_filter_hz)])
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            bufsize=0,
+        )
+        setattr(process, "_tx_iq_path", path)
+        return process
+
+    def stop_tx_burst(self, process) -> None:
+        try:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+        finally:
+            _cleanup_tx_file(process)
