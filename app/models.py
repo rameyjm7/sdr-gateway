@@ -3,6 +3,14 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+class OkResponse(BaseModel):
+    ok: bool = True
+
+
+class ErrorResponse(BaseModel):
+    detail: str
+
+
 class DeviceInfo(BaseModel):
     id: str
     driver: str
@@ -25,6 +33,22 @@ class StreamConfig(BaseModel):
     # Optional finite capture controls. If set, backend may stop after N samples.
     duration_seconds: int | None = Field(default=None, ge=1, le=3600)
     num_samples: int | None = Field(default=None, ge=1)
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "device_id": "hackrf:0",
+                    "center_freq_hz": 751000000,
+                    "sample_rate_sps": 2000000,
+                    "lna_gain_db": 16,
+                    "vga_gain_db": 20,
+                    "amp_enable": False,
+                    "baseband_filter_hz": 2000000,
+                    "duration_seconds": 5,
+                }
+            ]
+        }
+    }
 
 
 class StreamState(BaseModel):
@@ -41,6 +65,21 @@ class SweepConfig(BaseModel):
     lna_gain_db: int = Field(default=16, ge=0, le=40)
     vga_gain_db: int = Field(default=20, ge=0, le=62)
     amp_enable: bool = False
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "device_id": "hackrf:0",
+                    "start_freq_hz": 700000000,
+                    "stop_freq_hz": 820000000,
+                    "bin_width_hz": 100000,
+                    "lna_gain_db": 16,
+                    "vga_gain_db": 20,
+                    "amp_enable": False,
+                }
+            ]
+        }
+    }
 
 
 class SweepState(BaseModel):
@@ -67,6 +106,23 @@ class TxBurstConfig(BaseModel):
     iq_i8_b64: str = Field(min_length=4)
     repeat: int = Field(default=1, ge=1, le=1024)
     timeout_seconds: int = Field(default=30, ge=1, le=300)
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "device_id": "hackrf:0",
+                    "center_freq_hz": 751000000,
+                    "sample_rate_sps": 2000000,
+                    "tx_gain_db": 30,
+                    "amp_enable": False,
+                    "baseband_filter_hz": 2000000,
+                    "iq_i8_b64": "AQIDBA==",
+                    "repeat": 16,
+                    "timeout_seconds": 10,
+                }
+            ]
+        }
+    }
 
 
 class TxState(BaseModel):

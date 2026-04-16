@@ -74,6 +74,13 @@ class StreamManager:
         session.status = "stopped"
         del self._sessions[stream_id]
 
+    def stop_all(self) -> None:
+        for stream_id in list(self._sessions.keys()):
+            try:
+                self.stop(stream_id)
+            except Exception:
+                continue
+
     async def read_chunk(self, stream_id: str, nbytes: int = 16384) -> bytes:
         session = self._sessions[stream_id]
         stdout = session.process.stdout
@@ -137,6 +144,13 @@ class SweepManager:
         backend.stop_sweep(session.process)
         session.status = "stopped"
         del self._sessions[sweep_id]
+
+    def stop_all(self) -> None:
+        for sweep_id in list(self._sessions.keys()):
+            try:
+                self.stop(sweep_id)
+            except Exception:
+                continue
 
     def recent_samples(self, sweep_id: str):
         return list(self._sessions[sweep_id].samples)
@@ -255,3 +269,10 @@ class TxManager:
         session.returncode = session.process.poll()
         session.status = "stopped"
         del self._sessions[tx_id]
+
+    def stop_all(self) -> None:
+        for tx_id in list(self._sessions.keys()):
+            try:
+                self.stop(tx_id)
+            except Exception:
+                continue

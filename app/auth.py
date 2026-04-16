@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hmac
-import os
 import re
 
 from fastapi import Depends, HTTPException, Request, WebSocket
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette import status
+
+from app.config import get_settings
 
 
 _bearer = HTTPBearer(auto_error=False)
@@ -17,7 +18,7 @@ def auth_enabled() -> bool:
 
 
 def _expected_token() -> str:
-    return _normalize_token(os.getenv("SDR_GATEWAY_API_TOKEN", ""))
+    return _normalize_token(get_settings().api_token)
 
 
 def _normalize_token(raw: str | None) -> str:

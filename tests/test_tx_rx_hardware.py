@@ -146,6 +146,7 @@ async def _recv_ws_bytes(ws_url: str, target_bytes: int, timeout_s: float = 8.0)
     not _env_bool("RUN_SDR_HW_TESTS", default=False),
     reason="Set RUN_SDR_HW_TESTS=1 to run hardware functional tests.",
 )
+@pytest.mark.hardware
 def test_hackrf_tx_bladerf_rx_two_tone():
     api_base = os.getenv("SDR_GATEWAY_API_BASE", "http://127.0.0.1:8080").rstrip("/")
     ws_base = os.getenv("SDR_GATEWAY_WS_BASE", "ws://127.0.0.1:8080").rstrip("/")
