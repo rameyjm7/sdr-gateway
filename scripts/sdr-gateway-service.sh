@@ -10,7 +10,11 @@ RUN_GROUP="${SDR_GATEWAY_GROUP:-$(id -gn)}"
 HOST="${SDR_GATEWAY_HOST:-0.0.0.0}"
 PORT="${SDR_GATEWAY_PORT:-8080}"
 
-UVICORN_BIN="${SDR_GATEWAY_UVICORN:-${REPO_ROOT}/.venv/bin/uvicorn}"
+DEFAULT_UVICORN_BIN="${REPO_ROOT}/.venv/bin/uvicorn"
+if [[ ! -x "${DEFAULT_UVICORN_BIN}" && -x "${REPO_ROOT}/../.venv/bin/uvicorn" ]]; then
+  DEFAULT_UVICORN_BIN="${REPO_ROOT}/../.venv/bin/uvicorn"
+fi
+UVICORN_BIN="${SDR_GATEWAY_UVICORN:-${DEFAULT_UVICORN_BIN}}"
 ENV_FILE="${SDR_GATEWAY_ENV_FILE:-/etc/default/${SERVICE_NAME}}"
 
 usage() {
@@ -34,7 +38,7 @@ Environment overrides:
   SDR_GATEWAY_GROUP    (default: current user's group)
   SDR_GATEWAY_HOST     (default: 0.0.0.0)
   SDR_GATEWAY_PORT     (default: 8080)
-  SDR_GATEWAY_UVICORN  (default: <repo>/.venv/bin/uvicorn)
+  SDR_GATEWAY_UVICORN  (default: <repo>/.venv/bin/uvicorn, fallback: ../.venv/bin/uvicorn)
   SDR_GATEWAY_ENV_FILE (default: /etc/default/<service>)
   SDR_GATEWAY_API_TOKEN (optional; written to env file on install)
 EOF
