@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
@@ -181,6 +182,20 @@ def list_devices(_: None = Depends(require_http_auth)):
     responses=ERROR_RESPONSES,
 )
 def start_stream(config: StreamConfig, _: None = Depends(require_http_auth)):
+    logger.info(
+        "stream_start_requested device_id=%s center_freq_hz=%s sample_rate_sps=%s lna_gain_db=%s vga_gain_db=%s",
+        config.device_id,
+        config.center_freq_hz,
+        config.sample_rate_sps,
+        config.lna_gain_db,
+        config.vga_gain_db,
+        extra={
+            "request_id": "-",
+            "method": "POST",
+            "path": "/streams/start",
+            "status_code": 0,
+        },
+    )
     try:
         session = stream_manager.start(config)
     except KeyError as exc:
@@ -218,21 +233,58 @@ async def iq_stream(stream_id: str, websocket: WebSocket):
     except KeyError as exc:
         _raise_not_found(f"Unknown stream_id {stream_id}", exc)
 
+    keep_stream = websocket.query_params.get("keep", "").strip().lower() in {"1", "true", "yes"}
     await websocket.accept()
     try:
         while True:
             chunk = await stream_manager.read_chunk(stream_id)
             if not chunk:
+                try:
+                    session = stream_manager.get(stream_id)
+                    rc = session.process.poll()
+                    stderr_text = ""
+                    stderr = getattr(session.process, "stderr", None)
+                    if rc is not None and stderr is not None:
+                        raw = await asyncio.to_thread(stderr.read)
+                        if isinstance(raw, bytes):
+                            stderr_text = raw.decode("utf-8", errors="replace")[-1000:]
+                        else:
+                            stderr_text = str(raw)[-1000:]
+                    logger.warning(
+                        "stream_iq_empty_chunk stream_id=%s returncode=%s stderr_tail=%s",
+                        stream_id,
+                        rc,
+                        stderr_text.strip(),
+                        extra={
+                            "request_id": "-",
+                            "method": "WS",
+                            "path": f"/ws/iq/{stream_id}",
+                            "status_code": 0,
+                        },
+                    )
+                except Exception:
+                    pass
                 break
             await websocket.send_bytes(chunk)
     except WebSocketDisconnect:
-        pass
+        logger.info(
+            "stream_iq_websocket_disconnect stream_id=%s keep_stream=%s",
+            stream_id,
+            keep_stream,
+            extra={
+                "request_id": "-",
+                "method": "WS",
+                "path": f"/ws/iq/{stream_id}",
+                "status_code": 0,
+            },
+        )
     finally:
-        # Ensure dropped/refreshing clients don't leave orphan SDR processes running.
-        try:
-            stream_manager.stop(stream_id)
-        except KeyError:
-            pass
+        if not keep_stream:
+            # Ensure ordinary dropped/refreshing clients don't leave orphan SDR processes running.
+            try:
+                stream_manager.stop(stream_id)
+            except KeyError:
+                pass
 
 
 @app.post(
