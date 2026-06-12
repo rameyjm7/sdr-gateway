@@ -95,6 +95,9 @@ scripts/sdr-gateway-service.sh start
 ```
 
 The install helper writes `SDR_GATEWAY_API_TOKEN` to `/etc/default/sdr-gateway` by default.
+The generated service grants `CAP_NET_ADMIN` and `CAP_NET_RAW` so WiFi monitor capture,
+channel hopping, and optional active scans can work while the service still runs as the
+configured non-root user.
 
 Stop/restart/status:
 

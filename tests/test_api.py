@@ -58,6 +58,63 @@ class _FakeTxManager:
         return list(self._sessions.values())
 
 
+class _FakeWiFiMonitorManager:
+    def __init__(self) -> None:
+        self._sessions: dict[str, _FakeSession] = {}
+        self._events = [
+            {
+                "seen_at": 1.0,
+                "interface": "wlan0",
+                "raw": "Beacon (TestNet) BSSID:aa:bb:cc:dd:ee:ff -42dBm",
+                "kind": "beacon",
+                "ssid": "TestNet",
+                "bssid": "aa:bb:cc:dd:ee:ff",
+                "source": None,
+                "destination": None,
+                "rssi_dbm": -42,
+                "frequency_mhz": 2412,
+                "channel": 1,
+            }
+        ]
+
+    def list_interfaces(self):
+        return [
+            {
+                "name": "wlan0",
+                "type": "monitor",
+                "mac": "00:11:22:33:44:55",
+                "channel": 1,
+                "frequency_mhz": 2412,
+                "up": True,
+            }
+        ]
+
+    def start(self, config):
+        session = _FakeSession("wifi-1", config)
+        session.event_count = 0
+        self._sessions[session.id] = session
+        return session
+
+    def stop(self, wifi_scan_id: str) -> None:
+        if wifi_scan_id not in self._sessions:
+            raise KeyError(wifi_scan_id)
+        del self._sessions[wifi_scan_id]
+
+    def list_states(self):
+        return list(self._sessions.values())
+
+    def get(self, wifi_scan_id: str):
+        return self._sessions[wifi_scan_id]
+
+    def recent_events(self, wifi_scan_id: str, limit: int = 100):
+        if wifi_scan_id not in self._sessions:
+            raise KeyError(wifi_scan_id)
+        return self._events[-limit:]
+
+    def stop_all(self):
+        self._sessions.clear()
+
+
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv("SDR_GATEWAY_API_TOKEN", "test-token")
@@ -65,6 +122,7 @@ def client(monkeypatch):
     main.settings = get_settings()
     monkeypatch.setattr(main, "stream_manager", _FakeStreamManager())
     monkeypatch.setattr(main, "tx_manager", _FakeTxManager())
+    monkeypatch.setattr(main, "wifi_monitor_manager", _FakeWiFiMonitorManager())
     with TestClient(main.app) as c:
         yield c
     get_settings.cache_clear()
@@ -127,5 +185,33 @@ def test_tx_start_and_stop(client: TestClient):
     assert started.json()["tx_id"] == "tx-1"
 
     stopped = client.post("/tx/tx-1/stop", headers=_auth_headers())
+    assert stopped.status_code == 200
+    assert stopped.json() == {"ok": True}
+
+
+def test_wifi_monitor_interfaces_start_events_and_stop(client: TestClient):
+    interfaces = client.get("/wifi/interfaces", headers=_auth_headers())
+    assert interfaces.status_code == 200
+    assert interfaces.json()[0]["name"] == "wlan0"
+    assert interfaces.json()[0]["type"] == "monitor"
+
+    started = client.post(
+        "/wifi/scans/start",
+        headers=_auth_headers(),
+        json={"interface": "wlan0", "channel": 1, "set_channel": False, "set_monitor": False},
+    )
+    assert started.status_code == 200
+    assert started.json()["wifi_scan_id"] == "wifi-1"
+
+    scans = client.get("/wifi/scans", headers=_auth_headers())
+    assert scans.status_code == 200
+    assert scans.json()[0]["wifi_scan_id"] == "wifi-1"
+
+    events = client.get("/wifi/scans/wifi-1/events", headers=_auth_headers())
+    assert events.status_code == 200
+    assert events.json()[0]["kind"] == "beacon"
+    assert events.json()[0]["ssid"] == "TestNet"
+
+    stopped = client.post("/wifi/scans/wifi-1/stop", headers=_auth_headers())
     assert stopped.status_code == 200
     assert stopped.json() == {"ok": True}

@@ -81,6 +81,8 @@ Restart=on-failure
 RestartSec=2
 TimeoutStopSec=10
 LimitNOFILE=65535
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target

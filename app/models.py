@@ -238,6 +238,67 @@ class IQSweepChunk(BaseModel):
     iq_i8_b64: str
 
 
+class WiFiInterfaceInfo(BaseModel):
+    name: str
+    type: str | None = None
+    mac: str | None = None
+    channel: int | None = None
+    frequency_mhz: int | None = None
+    up: bool = False
+
+
+class WiFiMonitorConfig(BaseModel):
+    interface: str = Field(min_length=1, max_length=64)
+    channel: int | None = Field(default=None, ge=1, le=196)
+    channels: list[int] = Field(default_factory=list)
+    bands: list[str] = Field(default_factory=lambda: ["2.4", "5"])
+    set_channel: bool = True
+    set_monitor: bool = False
+    channel_hop_interval_s: float = Field(default=1.0, ge=0.1, le=60.0)
+    active_scan: bool = False
+    active_scan_interval_s: float = Field(default=60.0, ge=5.0, le=3600.0)
+    capture_filter: str = Field(default="", max_length=500)
+    command: str = Field(default="scapy", pattern="^(scapy|tcpdump|tshark)$")
+    max_events: int = Field(default=500, ge=10, le=10000)
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "interface": "wlan0",
+                    "bands": ["2.4", "5"],
+                    "set_channel": True,
+                    "set_monitor": False,
+                    "active_scan": False,
+                    "command": "tcpdump",
+                }
+            ]
+        }
+    }
+
+
+class WiFiMonitorState(BaseModel):
+    wifi_scan_id: str
+    status: str
+    config: WiFiMonitorConfig
+    event_count: int = 0
+    returncode: int | None = None
+    current_channel: int | None = None
+
+
+class WiFiMonitorEvent(BaseModel):
+    seen_at: float
+    interface: str
+    raw: str
+    kind: str = "wifi"
+    ssid: str | None = None
+    bssid: str | None = None
+    source: str | None = None
+    destination: str | None = None
+    rssi_dbm: int | None = None
+    frequency_mhz: int | None = None
+    channel: int | None = None
+
+
 class TxBurstConfig(BaseModel):
     device_id: str = Field(description="Device identifier from /devices")
     center_freq_hz: int = Field(ge=1_000_000, le=6_000_000_000)

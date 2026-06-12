@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import csv
 import io
 import logging
 import os
+import re
 import select
+import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -16,12 +20,44 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from app.models import IQSweepConfig, StreamConfig, SweepConfig, TxBurstConfig
+from app.models import IQSweepConfig, StreamConfig, SweepConfig, TxBurstConfig, WiFiMonitorConfig
 from app.sdr.backend import Device, IQSweepRequest, StreamRequest, SweepRequest, TxBurstRequest
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_STREAM_CHUNK_BYTES = int(os.getenv("SDR_GATEWAY_STREAM_CHUNK_BYTES", str(64 * 1024)))
+WIFI_DEFAULT_CAPTURE_FILTER = os.getenv(
+    "SDR_GATEWAY_WIFI_CAPTURE_FILTER",
+    "type mgt or type data",
+)
+WIFI_24_GHZ_HOP_CHANNELS = [1, 6, 11]
+WIFI_5_GHZ_HOP_CHANNELS = [
+    36,
+    40,
+    44,
+    48,
+    52,
+    56,
+    60,
+    64,
+    100,
+    104,
+    108,
+    112,
+    116,
+    120,
+    124,
+    128,
+    132,
+    136,
+    140,
+    144,
+    149,
+    153,
+    157,
+    161,
+    165,
+]
 
 
 class ManagedProcess(Protocol):
@@ -35,6 +71,666 @@ class RegistryLike(Protocol):
     def list_devices(self) -> list[Device]: ...
 
     def backend_for_device(self, device_id: str) -> Any: ...
+
+
+@dataclass
+class WiFiMonitorSession:
+    id: str
+    config: WiFiMonitorConfig
+    process: ManagedProcess | None
+    status: str = "running"
+    events: deque[dict[str, Any]] | None = None
+    event_count: int = 0
+    returncode: int | None = None
+    channels: list[int] = field(default_factory=list)
+    current_channel: int | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    control_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _stop: threading.Event | None = None
+
+
+class WiFiMonitorManager:
+    def __init__(self) -> None:
+        self._sessions: dict[str, WiFiMonitorSession] = {}
+
+    def list_interfaces(self) -> list[dict[str, Any]]:
+        interfaces = self._iw_interfaces()
+        if interfaces:
+            return sorted(interfaces, key=lambda item: str(item.get("name") or ""))
+        by_name = {str(item.get("name")): item for item in interfaces if item.get("name")}
+        for name in sorted(os.listdir("/sys/class/net")) if os.path.isdir("/sys/class/net") else []:
+            by_name.setdefault(
+                name,
+                {
+                    "name": name,
+                    "type": None,
+                    "mac": self._read_sys_text(f"/sys/class/net/{name}/address"),
+                    "channel": None,
+                    "frequency_mhz": None,
+                    "up": self._interface_up(name),
+                },
+            )
+        return sorted(by_name.values(), key=lambda item: str(item.get("name") or ""))
+
+    def list_states(self) -> list[WiFiMonitorSession]:
+        self._refresh()
+        return list(self._sessions.values())
+
+    def get(self, wifi_scan_id: str) -> WiFiMonitorSession:
+        self._refresh()
+        return self._sessions[wifi_scan_id]
+
+    def start(self, config: WiFiMonitorConfig) -> WiFiMonitorSession:
+        self._validate_interface(config)
+        if config.command == "scapy" and config.active_scan:
+            raise ValueError("active_scan with command=scapy is not supported yet; use tcpdump or tshark")
+        if any(session.config.interface == config.interface for session in self._sessions.values()):
+            raise ValueError(f"WiFi interface {config.interface} is already in use")
+        channels = self._channels_for_config(config)
+        if config.set_monitor:
+            self._set_interface_type(config.interface, "monitor")
+        if channels and config.set_channel:
+            self._set_channel(config.interface, channels[0])
+
+        session = WiFiMonitorSession(
+            id=str(uuid.uuid4()),
+            config=config,
+            process=None,
+            events=deque(maxlen=int(config.max_events)),
+            channels=channels,
+            current_channel=channels[0] if channels else config.channel,
+            _stop=threading.Event(),
+        )
+        self._sessions[session.id] = session
+        if config.command == "scapy":
+            threading.Thread(target=self._collect_scapy_events, args=(session,), daemon=True).start()
+        else:
+            session.process = self._start_capture(config)
+            threading.Thread(target=self._collect_events, args=(session,), daemon=True).start()
+        if len(channels) > 1 and config.set_channel:
+            threading.Thread(target=self._hop_channels, args=(session,), daemon=True).start()
+        if config.active_scan:
+            threading.Thread(target=self._active_scan_loop, args=(session,), daemon=True).start()
+        return session
+
+    def stop(self, wifi_scan_id: str) -> None:
+        session = self._sessions.pop(wifi_scan_id)
+        if session._stop is not None:
+            session._stop.set()
+        with session.lock:
+            if session.process is not None:
+                self._terminate(session.process)
+                session.returncode = session.process.poll()
+                session.process = None
+        session.status = "stopped"
+
+    def stop_all(self) -> None:
+        for wifi_scan_id in list(self._sessions.keys()):
+            try:
+                self.stop(wifi_scan_id)
+            except Exception:
+                continue
+
+    def recent_events(self, wifi_scan_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        session = self.get(wifi_scan_id)
+        events = list(session.events or [])
+        return events[-max(1, min(int(limit), 1000)) :]
+
+    def _refresh(self) -> None:
+        for session in self._sessions.values():
+            if session.status == "running":
+                with session.lock:
+                    process = session.process
+                if process is None:
+                    continue
+                rc = process.poll()
+                if rc is not None and session._stop is not None and not session._stop.is_set():
+                    try:
+                        with session.lock:
+                            session.process = self._start_capture(session.config)
+                    except Exception:
+                        session.status = "failed"
+                        session.returncode = int(rc)
+
+    def _collect_events(self, session: WiFiMonitorSession) -> None:
+        if session.events is None or session._stop is None:
+            return
+        while not session._stop.is_set():
+            with session.lock:
+                process = session.process
+                stdout = process.stdout if process is not None else None
+            if stdout is None:
+                time.sleep(0.05)
+                continue
+            line = stdout.readline()
+            if not line:
+                if process is not None and process.poll() is not None:
+                    try:
+                        with session.lock:
+                            if session.process is process:
+                                session.process = self._start_capture(session.config)
+                    except Exception:
+                        session.status = "failed"
+                        session.returncode = process.poll()
+                        break
+                time.sleep(0.02)
+                continue
+            parsed = self._parse_wifi_line(line.rstrip(), session.config.interface)
+            if parsed:
+                session.events.append(parsed)
+                session.event_count += 1
+        self._refresh()
+
+    def _collect_scapy_events(self, session: WiFiMonitorSession) -> None:
+        if session.events is None or session._stop is None:
+            return
+        try:
+            from scapy.all import conf, sniff
+            from scapy.layers.dot11 import Dot11
+        except ImportError:
+            session.status = "failed"
+            self._append_event(
+                session,
+                {
+                    "seen_at": time.time(),
+                    "interface": session.config.interface,
+                    "raw": "scapy is required for WiFi command=scapy",
+                    "kind": "control_error",
+                },
+            )
+            return
+
+        def on_packet(packet: Any) -> None:
+            if session._stop is not None and session._stop.is_set():
+                return
+            if not packet.haslayer(Dot11):
+                return
+            event = self._event_from_scapy_packet(packet, session)
+            if event:
+                self._append_event(session, event)
+
+        conf.sniff_promisc = True
+        while session._stop is not None and not session._stop.is_set():
+            try:
+                sniff(
+                    iface=session.config.interface,
+                    prn=on_packet,
+                    store=False,
+                    timeout=1.0,
+                )
+            except Exception as exc:
+                session.status = "failed"
+                self._append_event(
+                    session,
+                    {
+                        "seen_at": time.time(),
+                        "interface": session.config.interface,
+                        "raw": f"scapy sniff failed error={exc}",
+                        "kind": "control_error",
+                    },
+                )
+                time.sleep(1.0)
+        session.status = "stopped"
+
+    def _hop_channels(self, session: WiFiMonitorSession) -> None:
+        assert session._stop is not None
+        index = 0
+        while not session._stop.is_set():
+            time.sleep(float(session.config.channel_hop_interval_s))
+            if session._stop.is_set() or not session.channels:
+                break
+            index = (index + 1) % len(session.channels)
+            channel = session.channels[index]
+            try:
+                with session.control_lock:
+                    self._set_channel(session.config.interface, channel)
+                session.current_channel = channel
+            except Exception as exc:
+                self._append_event(
+                    session,
+                    {
+                        "seen_at": time.time(),
+                        "interface": session.config.interface,
+                        "raw": f"channel hop failed channel={channel} error={exc}",
+                        "kind": "control_error",
+                        "channel": channel,
+                    },
+                )
+
+    def _active_scan_loop(self, session: WiFiMonitorSession) -> None:
+        assert session._stop is not None
+        while not session._stop.wait(float(session.config.active_scan_interval_s)):
+            self._run_active_scan(session)
+
+    def _run_active_scan(self, session: WiFiMonitorSession) -> None:
+        interface = session.config.interface
+        with session.control_lock:
+            with session.lock:
+                old_process = session.process
+                session.process = None
+                if old_process is not None:
+                    self._terminate(old_process)
+            try:
+                self._set_interface_type(interface, "managed")
+                channels = session.channels or self._channels_for_config(session.config)
+                command = ["iw", "dev", interface, "scan"]
+                frequencies = [str(freq) for ch in channels if (freq := self._frequency_for_channel(ch))]
+                if frequencies:
+                    command.extend(["freq", *frequencies])
+                result = subprocess.run(command, text=True, capture_output=True, timeout=45, check=False)
+                if result.returncode != 0:
+                    raise RuntimeError((result.stderr or result.stdout).strip())
+                for event in self._parse_iw_scan_output(result.stdout, interface):
+                    self._append_event(session, event)
+            except Exception as exc:
+                self._append_event(
+                    session,
+                    {
+                        "seen_at": time.time(),
+                        "interface": interface,
+                        "raw": f"active scan failed error={exc}",
+                        "kind": "control_error",
+                    },
+                )
+            finally:
+                with session.lock:
+                    if session._stop is not None and session._stop.is_set():
+                        return
+                with contextlib.suppress(Exception):
+                    self._set_interface_type(interface, "monitor")
+                    if session.current_channel is not None:
+                        self._set_channel(interface, session.current_channel)
+                with session.lock:
+                    if session._stop is None or session._stop.is_set():
+                        return
+                    session.process = self._start_capture(session.config)
+
+    def _append_event(self, session: WiFiMonitorSession, event: dict[str, Any]) -> None:
+        if session.events is None:
+            return
+        session.events.append(event)
+        session.event_count += 1
+
+    @staticmethod
+    def _start_capture(config: WiFiMonitorConfig) -> subprocess.Popen[str]:
+        return subprocess.Popen(
+            WiFiMonitorManager._capture_command(config),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+
+    @staticmethod
+    def _capture_command(config: WiFiMonitorConfig) -> list[str]:
+        capture_filter = config.capture_filter.strip() or WIFI_DEFAULT_CAPTURE_FILTER
+        if config.command == "tshark":
+            command = ["tshark", "-i", config.interface, "-l", "-n"]
+            if capture_filter:
+                command.extend(["-f", capture_filter])
+            return command
+        command = ["tcpdump", "-i", config.interface, "-I", "-l", "-e", "-n", "-s", "256"]
+        if capture_filter:
+            command.extend(capture_filter.split())
+        return command
+
+    @staticmethod
+    def _channels_for_config(config: WiFiMonitorConfig) -> list[int]:
+        if config.channels:
+            return list(dict.fromkeys(int(ch) for ch in config.channels))
+        if config.channel is not None:
+            return [int(config.channel)]
+        bands = {str(band).strip().lower() for band in config.bands}
+        channels: list[int] = []
+        if {"2.4", "2g", "2ghz", "2.4ghz"} & bands:
+            channels.extend(WIFI_24_GHZ_HOP_CHANNELS)
+        if {"5", "5g", "5ghz"} & bands:
+            channels.extend(WIFI_5_GHZ_HOP_CHANNELS)
+        return channels or list(WIFI_24_GHZ_HOP_CHANNELS)
+
+    @staticmethod
+    def _set_interface_type(interface: str, mode: str) -> None:
+        WiFiMonitorManager._run_checked(["ip", "link", "set", interface, "down"])
+        WiFiMonitorManager._run_checked(["iw", "dev", interface, "set", "type", mode])
+        WiFiMonitorManager._run_checked(["ip", "link", "set", interface, "up"])
+
+    @staticmethod
+    def _set_channel(interface: str, channel: int) -> None:
+        WiFiMonitorManager._run_checked(["iw", "dev", interface, "set", "channel", str(int(channel))])
+
+    @staticmethod
+    def _frequency_for_channel(channel: int) -> int | None:
+        channel = int(channel)
+        if 1 <= channel <= 13:
+            return 2407 + (channel * 5)
+        if channel == 14:
+            return 2484
+        if 32 <= channel <= 177:
+            return 5000 + (channel * 5)
+        return None
+
+    @staticmethod
+    def _parse_iw_scan_output(output: str, interface: str) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+        for raw in output.splitlines():
+            line = raw.strip()
+            if line.startswith("BSS "):
+                if current:
+                    events.append(current)
+                bssid = line.split()[1].split("(")[0].lower()
+                current = {
+                    "seen_at": time.time(),
+                    "interface": interface,
+                    "raw": "",
+                    "kind": "active_ap",
+                    "ssid": None,
+                    "bssid": bssid,
+                    "source": bssid,
+                    "destination": None,
+                    "rssi_dbm": None,
+                    "frequency_mhz": None,
+                    "channel": None,
+                }
+                continue
+            if current is None:
+                continue
+            current["raw"] = f"{current.get('raw')}\n{line}".strip()
+            if line.startswith("freq:"):
+                with contextlib.suppress(ValueError):
+                    freq = int(line.split(":", 1)[1].strip())
+                    current["frequency_mhz"] = freq
+                    current["channel"] = WiFiMonitorManager._wifi_channel_from_frequency(freq)
+            elif line.startswith("signal:"):
+                match = re.search(r"(-?\d+(?:\.\d+)?)", line)
+                if match:
+                    current["rssi_dbm"] = int(float(match.group(1)))
+            elif line.startswith("SSID:"):
+                current["ssid"] = line.split(":", 1)[1].strip()
+        if current:
+            events.append(current)
+        return events
+
+    @staticmethod
+    def _parse_wifi_line(line: str, interface: str) -> dict[str, Any] | None:
+        text = line.strip()
+        if not text:
+            return None
+        lower = text.lower()
+        kind = "wifi"
+        if "beacon" in lower:
+            kind = "beacon"
+        elif "probe request" in lower or "probe-req" in lower:
+            kind = "probe_request"
+        elif "probe response" in lower or "probe-resp" in lower:
+            kind = "probe_response"
+        elif "data" in lower:
+            kind = "data"
+
+        ssid = None
+        for pattern in (r"Beacon \(([^)]*)\)", r"Probe Request \(([^)]*)\)", r"Probe Response \(([^)]*)\)"):
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                ssid = match.group(1)
+                break
+        bssid = WiFiMonitorManager._match_mac(text, "BSSID")
+        source = WiFiMonitorManager._match_mac(text, "SA") or WiFiMonitorManager._match_mac(text, "TA")
+        destination = WiFiMonitorManager._match_mac(text, "DA") or WiFiMonitorManager._match_mac(text, "RA")
+        rssi_match = re.search(r"(-\d+)\s*dBm", text, flags=re.IGNORECASE)
+        freq_match = re.search(r"\b(24\d{2}|5\d{3}|6\d{3})\s*MHz\b", text, flags=re.IGNORECASE)
+        frequency_mhz = int(freq_match.group(1)) if freq_match else None
+        return {
+            "seen_at": time.time(),
+            "interface": interface,
+            "raw": text,
+            "kind": kind,
+            "ssid": ssid,
+            "bssid": bssid,
+            "source": source,
+            "destination": destination,
+            "rssi_dbm": int(rssi_match.group(1)) if rssi_match else None,
+            "frequency_mhz": frequency_mhz,
+            "channel": WiFiMonitorManager._wifi_channel_from_frequency(frequency_mhz),
+        }
+
+    @staticmethod
+    def _event_from_scapy_packet(packet: Any, session: WiFiMonitorSession) -> dict[str, Any] | None:
+        try:
+            from scapy.layers.dot11 import Dot11, RadioTap
+        except ImportError:
+            return None
+        if not packet.haslayer(Dot11):
+            return None
+        dot11 = packet.getlayer(Dot11)
+        channel = session.current_channel
+        frequency_mhz = WiFiMonitorManager._frequency_for_channel(channel)
+        rssi_dbm = None
+        try:
+            if packet.haslayer(RadioTap):
+                radio = packet.getlayer(RadioTap)
+                signal = getattr(radio, "dBm_AntSignal", None)
+                if signal is not None:
+                    rssi_dbm = int(signal)
+                channel_freq = getattr(radio, "ChannelFrequency", None)
+                if channel_freq:
+                    frequency_mhz = int(channel_freq)
+                    inferred_channel = WiFiMonitorManager._wifi_channel_from_frequency(frequency_mhz)
+                    if inferred_channel is not None:
+                        channel = inferred_channel
+        except Exception:
+            pass
+        source = str(getattr(dot11, "addr2", None) or "").lower()
+        destination = str(getattr(dot11, "addr1", None) or "").lower()
+        bssid = str(getattr(dot11, "addr3", None) or "").lower()
+        kind = WiFiMonitorManager._scapy_packet_kind(dot11)
+        ssid = WiFiMonitorManager._scapy_ssid(packet)
+        raw = WiFiMonitorManager._wifi_compact_summary(
+            kind=kind,
+            ssid=ssid,
+            source=source,
+            destination=destination,
+            bssid=bssid,
+        )
+        return {
+            "seen_at": float(getattr(packet, "time", time.time())),
+            "interface": session.config.interface,
+            "raw": raw,
+            "kind": kind,
+            "ssid": ssid,
+            "bssid": bssid,
+            "source": source,
+            "destination": destination,
+            "rssi_dbm": rssi_dbm,
+            "frequency_mhz": frequency_mhz,
+            "channel": channel,
+        }
+
+    @staticmethod
+    def _wifi_compact_summary(
+        *,
+        kind: str,
+        ssid: str | None,
+        source: str,
+        destination: str,
+        bssid: str,
+    ) -> str:
+        parts = [kind]
+        if ssid:
+            parts.append(f"ssid={ssid}")
+        if source:
+            parts.append(f"sa={source}")
+        if destination:
+            parts.append(f"da={destination}")
+        if bssid:
+            parts.append(f"bssid={bssid}")
+        return " ".join(parts)
+
+    @staticmethod
+    def _scapy_packet_kind(dot11: Any) -> str:
+        type_id = int(getattr(dot11, "type", -1))
+        subtype_id = int(getattr(dot11, "subtype", -1))
+        type_name = {0: "mgmt", 1: "ctrl", 2: "data", 3: "ext"}.get(type_id, f"type{type_id}")
+        subtype_names = {
+            (0, 0): "association_request",
+            (0, 1): "association_response",
+            (0, 2): "reassociation_request",
+            (0, 3): "reassociation_response",
+            (0, 4): "probe_request",
+            (0, 5): "probe_response",
+            (0, 8): "beacon",
+            (0, 9): "atim",
+            (0, 10): "disassociation",
+            (0, 11): "authentication",
+            (0, 12): "deauthentication",
+            (0, 13): "action",
+            (1, 8): "block_ack_request",
+            (1, 9): "block_ack",
+            (1, 10): "ps_poll",
+            (1, 11): "rts",
+            (1, 12): "cts",
+            (1, 13): "ack",
+            (1, 14): "cf_end",
+            (1, 15): "cf_end_ack",
+            (2, 0): "data",
+            (2, 4): "null",
+            (2, 8): "qos_data",
+            (2, 12): "qos_null",
+        }
+        return f"{type_name}.{subtype_names.get((type_id, subtype_id), f'subtype{subtype_id}')}"
+
+    @staticmethod
+    def _scapy_ssid(packet: Any) -> str | None:
+        try:
+            from scapy.layers.dot11 import Dot11Elt
+        except ImportError:
+            return None
+        try:
+            elt = packet.getlayer(Dot11Elt)
+            while elt is not None:
+                if int(getattr(elt, "ID", -1)) == 0:
+                    raw = bytes(getattr(elt, "info", b"") or b"")
+                    return raw.decode("utf-8", errors="replace")
+                elt = elt.payload.getlayer(Dot11Elt)
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _match_mac(text: str, label: str) -> str | None:
+        match = re.search(rf"\b{re.escape(label)}:(([0-9a-fA-F]{{2}}:){{5}}[0-9a-fA-F]{{2}})", text)
+        return match.group(1).lower() if match else None
+
+    @staticmethod
+    def _wifi_channel_from_frequency(frequency_mhz: int | None) -> int | None:
+        if frequency_mhz is None:
+            return None
+        if frequency_mhz == 2484:
+            return 14
+        if 2412 <= frequency_mhz <= 2472:
+            return ((frequency_mhz - 2412) // 5) + 1
+        if 5000 <= frequency_mhz <= 5900:
+            return (frequency_mhz - 5000) // 5
+        if 5955 <= frequency_mhz <= 7115:
+            return ((frequency_mhz - 5955) // 5) + 1
+        return None
+
+    @staticmethod
+    def _iw_interfaces() -> list[dict[str, Any]]:
+        if shutil.which("iw") is None:
+            return []
+        try:
+            result = subprocess.run(["iw", "dev"], text=True, capture_output=True, timeout=4, check=False)
+        except Exception:
+            return []
+        interfaces: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+        for raw in result.stdout.splitlines():
+            line = raw.strip()
+            if line.startswith("Interface "):
+                if current:
+                    current["up"] = WiFiMonitorManager._interface_up(str(current.get("name") or ""))
+                    interfaces.append(current)
+                current = {
+                    "name": line.split(maxsplit=1)[1],
+                    "type": None,
+                    "mac": None,
+                    "channel": None,
+                    "frequency_mhz": None,
+                    "up": False,
+                }
+                continue
+            if current is None:
+                continue
+            if line.startswith("addr "):
+                current["mac"] = line.split(maxsplit=1)[1].lower()
+            elif line.startswith("type "):
+                current["type"] = line.split(maxsplit=1)[1]
+            elif line.startswith("channel "):
+                parts = line.split()
+                try:
+                    current["channel"] = int(parts[1])
+                except (IndexError, ValueError):
+                    pass
+                match = re.search(r"\((\d+)\s*MHz\)", line)
+                if match:
+                    current["frequency_mhz"] = int(match.group(1))
+        if current:
+            current["up"] = WiFiMonitorManager._interface_up(str(current.get("name") or ""))
+            interfaces.append(current)
+        return interfaces
+
+    @staticmethod
+    def _read_sys_text(path: str) -> str | None:
+        try:
+            return open(path, encoding="utf-8").read().strip()
+        except OSError:
+            return None
+
+    @staticmethod
+    def _interface_up(name: str) -> bool:
+        state = WiFiMonitorManager._read_sys_text(f"/sys/class/net/{name}/operstate")
+        return state in {"up", "unknown"}
+
+    def _validate_interface(self, config: WiFiMonitorConfig) -> None:
+        interface = config.interface
+        if "/" in interface or interface in {"", ".", ".."}:
+            raise ValueError("invalid interface name")
+        if not os.path.exists(f"/sys/class/net/{interface}"):
+            raise KeyError(f"Unknown WiFi interface '{interface}'")
+        if config.command == "scapy":
+            try:
+                import scapy.all  # noqa: F401
+            except ImportError as exc:
+                raise ValueError("scapy is required for WiFi command=scapy") from exc
+            return
+        if shutil.which(config.command) is None:
+            raise ValueError(f"{config.command} is required for WiFi monitor scans")
+
+    @staticmethod
+    def _run_checked(command: list[str]) -> None:
+        result = subprocess.run(command, text=True, capture_output=True, timeout=8, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(f"{' '.join(command)} failed: {(result.stderr or result.stdout).strip()}")
+
+    @staticmethod
+    def _terminate(process: ManagedProcess) -> None:
+        try:
+            if hasattr(process, "pid"):
+                os.killpg(process.pid, 15)
+            else:
+                process.terminate()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        deadline = time.time() + 2.0
+        while process.poll() is None and time.time() < deadline:
+            time.sleep(0.05)
+        if process.poll() is None:
+            try:
+                if hasattr(process, "pid"):
+                    os.killpg(process.pid, 9)
+            except Exception:
+                pass
 
 
 @dataclass

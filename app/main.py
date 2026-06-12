@@ -38,10 +38,14 @@ from app.models import (
     SweepState,
     TxBurstConfig,
     TxState,
+    WiFiInterfaceInfo,
+    WiFiMonitorConfig,
+    WiFiMonitorEvent,
+    WiFiMonitorState,
 )
 from app.observability import Metrics, configure_logging
 from app.sdr.registry import BackendRegistry
-from app.services import DEFAULT_STREAM_CHUNK_BYTES, IQSweepManager, StreamManager, SweepManager, TxManager
+from app.services import DEFAULT_STREAM_CHUNK_BYTES, IQSweepManager, StreamManager, SweepManager, TxManager, WiFiMonitorManager
 
 settings = get_settings()
 configure_logging(settings.log_level, settings.log_json)
@@ -68,6 +72,7 @@ async def _lifespan(_app: FastAPI):
         iq_sweep_manager.stop_all()
         sweep_manager.stop_all()
         stream_manager.stop_all()
+        wifi_monitor_manager.stop_all()
         logger.info(
             "gateway_stop",
             extra={
@@ -88,6 +93,7 @@ sweep_manager = SweepManager(registry)
 iq_sweep_manager = IQSweepManager(stream_manager)
 tx_manager = TxManager(registry)
 apex_hunter = ApexHunterService(registry, stream_manager, sweep_manager)
+wifi_monitor_manager = WiFiMonitorManager()
 
 if WEB_DIR.exists():
     app.mount("/web", StaticFiles(directory=WEB_DIR), name="web")
@@ -277,6 +283,7 @@ def get_metrics(_: None = Depends(require_http_auth)):
         "sweeps": len(sweep_manager.list_states()),
         "iq_sweeps": len(iq_sweep_manager.list_states()),
         "tx": len(tx_manager.list_states()),
+        "wifi_scans": len(wifi_monitor_manager.list_states()),
     }
     return snapshot
 
@@ -291,6 +298,85 @@ def list_devices(_: None = Depends(require_http_auth)):
     devices = registry.list_devices()
     occupancy = _device_occupancy()
     return [DeviceInfo(**d.__dict__, **occupancy.get(d.id, {})) for d in devices]
+
+
+@app.get("/wifi/interfaces", response_model=list[WiFiInterfaceInfo], responses=ERROR_RESPONSES)
+def list_wifi_interfaces(_: None = Depends(require_http_auth)):
+    return [WiFiInterfaceInfo(**item) for item in wifi_monitor_manager.list_interfaces()]
+
+
+@app.post("/wifi/scans/start", response_model=WiFiMonitorState, responses=ERROR_RESPONSES)
+def start_wifi_scan(config: WiFiMonitorConfig, _: None = Depends(require_http_auth)):
+    try:
+        session = wifi_monitor_manager.start(config)
+    except KeyError as exc:
+        _raise_not_found(str(exc), exc)
+    except Exception as exc:
+        _raise_bad_request(exc)
+    return WiFiMonitorState(
+        wifi_scan_id=session.id,
+        status=session.status,
+        config=session.config,
+        event_count=session.event_count,
+        returncode=session.returncode,
+        current_channel=getattr(session, "current_channel", None),
+    )
+
+
+@app.post("/wifi/scans/{wifi_scan_id}/stop", response_model=OkResponse, responses=ERROR_RESPONSES)
+def stop_wifi_scan(wifi_scan_id: str, _: None = Depends(require_http_auth)):
+    try:
+        wifi_monitor_manager.stop(wifi_scan_id)
+    except KeyError as exc:
+        _raise_not_found(f"Unknown wifi_scan_id {wifi_scan_id}", exc)
+    return OkResponse(ok=True)
+
+
+@app.get("/wifi/scans", response_model=list[WiFiMonitorState], responses=ERROR_RESPONSES)
+def list_wifi_scans(_: None = Depends(require_http_auth)):
+    return [
+        WiFiMonitorState(
+            wifi_scan_id=session.id,
+            status=session.status,
+            config=session.config,
+            event_count=session.event_count,
+            returncode=session.returncode,
+            current_channel=getattr(session, "current_channel", None),
+        )
+        for session in wifi_monitor_manager.list_states()
+    ]
+
+
+@app.get("/wifi/scans/{wifi_scan_id}/events", response_model=list[WiFiMonitorEvent], responses=ERROR_RESPONSES)
+def wifi_scan_events(wifi_scan_id: str, limit: int = 100, _: None = Depends(require_http_auth)):
+    try:
+        return [WiFiMonitorEvent(**event) for event in wifi_monitor_manager.recent_events(wifi_scan_id, limit=limit)]
+    except KeyError as exc:
+        _raise_not_found(f"Unknown wifi_scan_id {wifi_scan_id}", exc)
+
+
+@app.websocket("/ws/wifi/scans/{wifi_scan_id}")
+async def wifi_scan_stream(wifi_scan_id: str, websocket: WebSocket):
+    if not await require_ws_auth(websocket):
+        return
+    try:
+        wifi_monitor_manager.get(wifi_scan_id)
+    except KeyError:
+        await websocket.close(code=1008, reason=f"Unknown wifi_scan_id {wifi_scan_id}")
+        return
+    await websocket.accept()
+    sent = 0
+    try:
+        while True:
+            events = wifi_monitor_manager.recent_events(wifi_scan_id, limit=1000)
+            if sent > len(events):
+                sent = 0
+            for event in events[sent:]:
+                await websocket.send_json(event)
+            sent = len(events)
+            await asyncio.sleep(0.25)
+    except WebSocketDisconnect:
+        pass
 
 
 @app.post(
