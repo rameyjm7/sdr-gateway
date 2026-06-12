@@ -4,6 +4,7 @@ import os
 
 from app.sdr.backend import SDRBackend
 from app.sdr.airspy_backend import AirspyBackend
+from app.sdr.antsdr_e200_backend import AntSDRE200Backend
 from app.sdr.bladerf_backend import BladeRFBackend
 from app.sdr.hackrf_backend import HackRFBackend
 from app.sdr.mock_backend import MockBackend
@@ -18,6 +19,7 @@ class BackendRegistry:
         self.backends: list[SDRBackend] = [
             HackRFBackend(),
             AirspyBackend(),
+            AntSDRE200Backend(),
             BladeRFBackend(),
             RTLSDRBackend(),
             SidekiqBackend(),

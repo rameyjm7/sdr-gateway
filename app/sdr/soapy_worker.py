@@ -125,9 +125,13 @@ def _apply_driver_gain(dev, driver: str, lna_gain_db: int, vga_gain_db: int) -> 
     elif driver == "airspy":
         # Airspy commonly exposes LNA/MIX/VGA controls.
         set_any = False
-        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", float(lna_gain_db)) or set_any
-        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "mix", float(vga_gain_db)) or set_any
-        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "vga", float(vga_gain_db)) or set_any
+        lna = max(0.0, float(lna_gain_db))
+        post_lna = max(0.0, float(vga_gain_db))
+        mix = min(post_lna, 15.0)
+        vga = max(0.0, post_lna - mix)
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", lna) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "mix", mix) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "vga", vga) or set_any
         if set_any:
             return
     elif driver == "bladerf":

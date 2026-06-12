@@ -1,17 +1,18 @@
 # sdr-gateway
 
-Network SDR control service for local radios (HackRF + SoapySDR streaming for Sidekiq/Airspy/bladeRF/RTL-SDR), with:
+Network SDR control service for local radios (HackRF + SoapySDR streaming for Sidekiq/Airspy/bladeRF/RTL-SDR, plus AntSDR E200 via libiio), with:
 
 - Device discovery (`/devices`)
 - Start/stop IQ streaming (`/streams/*` + `/ws/iq/{stream_id}`)
 - Start/stop TX burst sessions (`/tx/*`)
 - Start/stop spectrum sweep (`/sweeps/*`)
 - Recent sweep samples (`/sweeps/{id}/samples`)
+- Apex Hunter fleet orchestration (`/apex/*`)
 - Built-in web viewer at `/` for tuning and live sweep/persistence plotting
 
 ## Why this layout
 
-This keeps high-rate SDR I/O in native tools (`hackrf_transfer`, `hackrf_sweep`, SoapySDR drivers)
+This keeps high-rate SDR I/O in native tools (`hackrf_transfer`, `hackrf_sweep`, SoapySDR drivers, libiio/pyadi-iio)
 while using Python/FastAPI for orchestration and remote control.
 
 ## Requirements
@@ -19,6 +20,7 @@ while using Python/FastAPI for orchestration and remote control.
 - Python 3.10+
 - `hackrf-tools` installed on the SDR host (`hackrf_info`, `hackrf_transfer`, `hackrf_sweep`)
 - For Soapy radios (Sidekiq/Airspy/bladeRF/RTL-SDR): `SoapySDRUtil --find` must show matching drivers, and Python must import `SoapySDR`
+- For AntSDR E200: the board should be reachable at `ip:192.168.1.10` (override with `ANTSDR_E200_URI`), and Python must import `adi` from `pyadi-iio` with libiio bindings available
 - Mock backend is disabled by default; enable with `SDR_ENABLE_MOCK=1` when needed.
 
 ## Configuration
@@ -39,7 +41,7 @@ cd /home/jake/workspace/SDR/sdr-gateway
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-uvicorn app.main:app --host 0.0.0.0 --port 8080
+sdr-gateway --host 0.0.0.0 --port 8080
 ```
 
 For reproducible installs (recommended):
@@ -54,6 +56,22 @@ Then open:
 - `http://localhost:8080/`
 - `http://localhost:8080/docs` (Swagger)
 - `http://localhost:8080/openapi.json`
+
+Probe devices from the same venv:
+
+```bash
+source .venv/bin/activate
+sdr-gateway --probe
+```
+
+If auth is enabled:
+
+```bash
+export SDR_GATEWAY_API_TOKEN="..."
+sdr-gateway --probe
+```
+
+`--probe` prints device occupancy from the running gateway when available, including whether a radio is busy and which session owns it. If the gateway is not running, it falls back to local device discovery and marks busy status as `unknown`.
 
 ## Run as system service (systemd)
 
@@ -126,6 +144,31 @@ Request observability:
 - `POST /sweeps/start`
 - `POST /sweeps/{sweep_id}/stop`
 - `GET /sweeps/{sweep_id}/samples`
+- `GET /apex/resources`
+- `POST /apex/resources`
+- `POST /apex/resources/{resource_id}/delete`
+- `POST /apex/plan`
+- `POST /apex/run`
+- `GET /apex/missions`
+
+## Apex Hunter (fleet control + agentic planning)
+
+Apex Hunter treats your environment as a controllable fleet:
+
+- one or more SDR resources discovered from `/devices`
+- optional external resources registered by API (`kind=api`)
+
+Mission flow:
+
+1. Register any external API systems with `POST /apex/resources`
+2. Submit mission objective/constraints to `POST /apex/plan`
+3. Execute with `POST /apex/run` (`execute=true`) for immediate sweep actions
+4. Track mission state with `GET /apex/missions`
+
+LangChain integration:
+
+- If `OPENAI_API_KEY` is present, Apex Hunter attempts LangChain-based planning first.
+- If unavailable, it falls back to deterministic heuristic planning so mission orchestration still works.
 
 ## Example stream start
 

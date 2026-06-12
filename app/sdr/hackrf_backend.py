@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import io
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 from typing import Iterable
 
-from app.sdr.backend import Device, SDRBackend, StreamRequest, SweepRequest, TxBurstRequest
+from app.sdr.backend import Device, IQSweepRequest, SDRBackend, StreamRequest, SweepRequest, TxBurstRequest
 
 
 HACKRF_FREQ_MIN = 1_000_000
 HACKRF_FREQ_MAX = 6_000_000_000
 HACKRF_MAX_SAMPLE_RATE = 20_000_000
+HACKRF_STARTUP_CHECK_SECONDS = 0.25
+HACKRF_IQ_SWEEP_BIN = os.path.join(os.path.dirname(__file__), "native", "bin", "hackrf_iq_sweep")
 
 
 def _cmd_available(command: str) -> bool:
@@ -60,6 +65,81 @@ def _cleanup_tx_file(process: object) -> None:
         os.unlink(tx_file)
     except OSError:
         pass
+
+
+def _read_stderr_tail(process: subprocess.Popen, limit: int = 2000) -> str:
+    stderr = process.stderr
+    if stderr is None:
+        return ""
+    try:
+        data = stderr.read(limit)
+    except Exception:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace").strip()
+    return str(data).strip()
+
+
+def _child_hackrf_transfer_pids(exclude_pid: int | None = None) -> list[int]:
+    parent_pid = os.getpid()
+    pids: list[int] = []
+    proc_root = "/proc"
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return pids
+
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if exclude_pid is not None and pid == exclude_pid:
+            continue
+        try:
+            with open(os.path.join(proc_root, entry, "status"), encoding="utf-8", errors="replace") as f:
+                status = f.read()
+            if f"PPid:\t{parent_pid}" not in status:
+                continue
+            with open(os.path.join(proc_root, entry, "comm"), encoding="utf-8", errors="replace") as f:
+                command = f.read().strip()
+        except OSError:
+            continue
+        if command == "hackrf_transfer":
+            pids.append(pid)
+    return pids
+
+
+def _terminate_child_hackrf_transfers(exclude_pid: int | None = None) -> int:
+    pids = _child_hackrf_transfer_pids(exclude_pid=exclude_pid)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+
+    if pids:
+        time.sleep(0.2)
+
+    for pid in _child_hackrf_transfer_pids(exclude_pid=exclude_pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+    return len(pids)
+
+
+def _popen_iq_stream(cmd: list[str]) -> subprocess.Popen:
+    return subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+        text=False,
+    )
 
 
 class HackRFBackend(SDRBackend):
@@ -153,14 +233,8 @@ class HackRFBackend(SDRBackend):
         if num_samples:
             cmd.extend(["-n", str(num_samples)])
 
-        # stdout carries raw interleaved int8 IQ bytes.
-        return subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=0,
-            text=False,
-        )
+        continuous = num_samples is None
+        return self._start_hackrf_transfer(cmd, continuous=continuous)
 
     def stop_stream(self, process) -> None:
         if process.poll() is None:
@@ -169,6 +243,32 @@ class HackRFBackend(SDRBackend):
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 process.kill()
+
+    def _start_hackrf_transfer(self, cmd: list[str], continuous: bool):
+        process = _popen_iq_stream(cmd)
+        if not continuous:
+            return process
+
+        time.sleep(HACKRF_STARTUP_CHECK_SECONDS)
+        returncode = process.poll()
+        if returncode is None:
+            return process
+
+        stderr_tail = _read_stderr_tail(process)
+        if "Resource busy" in stderr_tail:
+            stale_count = _terminate_child_hackrf_transfers(exclude_pid=process.pid)
+            if stale_count:
+                process = _popen_iq_stream(cmd)
+                time.sleep(HACKRF_STARTUP_CHECK_SECONDS)
+                returncode = process.poll()
+                if returncode is None:
+                    return process
+                stderr_tail = _read_stderr_tail(process)
+
+        raise RuntimeError(
+            "hackrf_transfer exited during stream startup "
+            f"returncode={returncode} stderr_tail={stderr_tail}"
+        )
 
     def start_sweep(self, request: SweepRequest):
         if not _cmd_available("hackrf_sweep"):
@@ -210,6 +310,71 @@ class HackRFBackend(SDRBackend):
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 process.kill()
+
+    def start_iq_sweep(self, request: IQSweepRequest):
+        if not os.path.exists(HACKRF_IQ_SWEEP_BIN):
+            raise RuntimeError(
+                f"native HackRF IQ sweep worker not built: {HACKRF_IQ_SWEEP_BIN}; run `make native`"
+            )
+
+        lna = _nearest_step(request.lna_gain_db, step=8, lo=0, hi=40)
+        vga = _nearest_step(request.vga_gain_db, step=2, lo=0, hi=62)
+        cmd = [
+            HACKRF_IQ_SWEEP_BIN,
+            "--sample-rate-sps",
+            str(request.sample_rate_sps),
+            "--lna-gain-db",
+            str(lna),
+            "--vga-gain-db",
+            str(vga),
+            "--amp-enable",
+            "1" if request.amp_enable else "0",
+            "--chunk-bytes",
+            str(request.chunk_bytes),
+            "--dwell-s",
+            f"{float(request.dwell_s):.6f}",
+        ]
+        if request.baseband_filter_hz:
+            cmd.extend(["--baseband-filter-hz", str(request.baseband_filter_hz)])
+        if request.center_freqs_hz:
+            cmd.extend(["--freqs", ",".join(str(freq) for freq in request.center_freqs_hz)])
+            if request.hop_hz:
+                cmd.extend(["--hop-hz", str(request.hop_hz)])
+        else:
+            if request.start_freq_hz is None or request.stop_freq_hz is None or request.hop_hz is None:
+                raise ValueError("native IQ sweep requires center_freqs_hz or start/stop/hop")
+            cmd.extend(
+                [
+                    "--start-hz",
+                    str(request.start_freq_hz),
+                    "--stop-hz",
+                    str(request.stop_freq_hz),
+                    "--hop-hz",
+                    str(request.hop_hz),
+                ]
+            )
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            bufsize=0,
+        )
+        if process.stdout is not None:
+            try:
+                os.set_blocking(process.stdout.fileno(), False)
+            except (AttributeError, OSError, io.UnsupportedOperation):
+                pass
+        if process.stderr is not None:
+            try:
+                os.set_blocking(process.stderr.fileno(), False)
+            except (AttributeError, OSError, io.UnsupportedOperation):
+                pass
+        return process
+
+    def stop_iq_sweep(self, process) -> None:
+        self.stop_sweep(process)
 
     def start_tx_burst(self, request: TxBurstRequest):
         if not _cmd_available("hackrf_transfer"):

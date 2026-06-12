@@ -41,6 +41,22 @@ class SweepRequest:
 
 
 @dataclass(frozen=True)
+class IQSweepRequest:
+    device_id: str
+    center_freqs_hz: list[int]
+    start_freq_hz: int | None
+    stop_freq_hz: int | None
+    hop_hz: int | None
+    sample_rate_sps: int
+    dwell_s: float
+    lna_gain_db: int
+    vga_gain_db: int
+    amp_enable: bool
+    baseband_filter_hz: int | None
+    chunk_bytes: int
+
+
+@dataclass(frozen=True)
 class TxBurstRequest:
     device_id: str
     center_freq_hz: int
@@ -63,6 +79,10 @@ class SDRBackend(Protocol):
     def start_sweep(self, request: SweepRequest): ...
 
     def stop_sweep(self, process) -> None: ...
+
+    def start_iq_sweep(self, request: IQSweepRequest): ...
+
+    def stop_iq_sweep(self, process) -> None: ...
 
     def start_tx_burst(self, request: TxBurstRequest): ...
 
