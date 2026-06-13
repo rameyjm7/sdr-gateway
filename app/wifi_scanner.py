@@ -112,6 +112,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--event-limit", type=int, default=500)
     parser.add_argument("--raw-max", type=int, default=180)
     parser.add_argument("--scan-id", default="", help="Attach to an existing gateway WiFi scan.")
+    parser.add_argument(
+        "--replace-existing",
+        action="store_true",
+        help="Stop existing gateway WiFi scans on this interface before starting.",
+    )
+    parser.add_argument("--json", action="store_true", help="Print one JSON event per line instead of CSV.")
     parser.add_argument("--no-header", action="store_true")
     parser.add_argument("--once", action="store_true", help="Print current events once and exit.")
     return parser.parse_args()
@@ -180,6 +186,7 @@ def _start_scan(args: argparse.Namespace) -> str:
         "active_scan_interval_s": float(args.active_scan_interval_s),
         "command": args.command,
         "max_events": max(10, int(args.event_limit)),
+        "replace_existing": bool(args.replace_existing),
     }
     if args.capture_filter.strip():
         payload["capture_filter"] = args.capture_filter.strip()
@@ -361,7 +368,7 @@ def _run_scapy(args: argparse.Namespace) -> int:
     channel_lock = threading.Lock()
     current_channel = channels[0] if channels else args.channel
     writer = csv.writer(sys.stdout)
-    if not args.no_header:
+    if not args.json and not args.no_header:
         _print_header(writer)
         sys.stdout.flush()
 
@@ -551,8 +558,14 @@ def _run(args: argparse.Namespace) -> int:
                 seen.add(key)
                 count_key = _count_key(event)
                 counts[count_key] = counts.get(count_key, 0) + 1
-                writer.writerow(_row(event, counts[count_key], int(args.raw_max)))
-                sys.stdout.flush()
+                if args.json:
+                    payload = dict(event)
+                    payload["protocol"] = "wifi"
+                    payload["count"] = counts[count_key]
+                    print(json.dumps(payload, separators=(",", ":")), flush=True)
+                else:
+                    writer.writerow(_row(event, counts[count_key], int(args.raw_max)))
+                    sys.stdout.flush()
             if args.once:
                 break
             time.sleep(max(0.05, float(args.poll_s)))

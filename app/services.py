@@ -124,7 +124,15 @@ class WiFiMonitorManager:
         self._validate_interface(config)
         if config.command == "scapy" and config.active_scan:
             raise ValueError("active_scan with command=scapy is not supported yet; use tcpdump or tshark")
-        if any(session.config.interface == config.interface for session in self._sessions.values()):
+        existing_ids = [
+            wifi_scan_id
+            for wifi_scan_id, session in list(self._sessions.items())
+            if session.config.interface == config.interface
+        ]
+        if existing_ids and config.replace_existing:
+            for wifi_scan_id in existing_ids:
+                self.stop(wifi_scan_id)
+        elif existing_ids:
             raise ValueError(f"WiFi interface {config.interface} is already in use")
         channels = self._channels_for_config(config)
         if config.set_monitor:
@@ -610,6 +618,8 @@ class WiFiMonitorManager:
             while elt is not None:
                 if int(getattr(elt, "ID", -1)) == 0:
                     raw = bytes(getattr(elt, "info", b"") or b"")
+                    if not raw or not raw.replace(b"\x00", b"").strip():
+                        return None
                     return raw.decode("utf-8", errors="replace")
                 elt = elt.payload.getlayer(Dot11Elt)
         except Exception:

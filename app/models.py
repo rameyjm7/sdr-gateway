@@ -260,6 +260,7 @@ class WiFiMonitorConfig(BaseModel):
     capture_filter: str = Field(default="", max_length=500)
     command: str = Field(default="scapy", pattern="^(scapy|tcpdump|tshark)$")
     max_events: int = Field(default=500, ge=10, le=10000)
+    replace_existing: bool = False
     model_config = {
         "json_schema_extra": {
             "examples": [
