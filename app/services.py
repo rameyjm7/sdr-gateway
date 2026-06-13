@@ -122,8 +122,8 @@ class WiFiMonitorManager:
 
     def start(self, config: WiFiMonitorConfig) -> WiFiMonitorSession:
         self._validate_interface(config)
-        if config.command == "scapy" and config.active_scan:
-            raise ValueError("active_scan with command=scapy is not supported yet; use tcpdump or tshark")
+        if config.command in {"scapy", "pyshark"} and config.active_scan:
+            raise ValueError(f"active_scan with command={config.command} is not supported yet; use tcpdump or tshark")
         existing_ids = [
             wifi_scan_id
             for wifi_scan_id, session in list(self._sessions.items())
@@ -137,8 +137,18 @@ class WiFiMonitorManager:
         channels = self._channels_for_config(config)
         if config.set_monitor:
             self._set_interface_type(config.interface, "monitor")
+        initial_control_event: dict[str, Any] | None = None
         if channels and config.set_channel:
-            self._set_channel(config.interface, channels[0])
+            try:
+                self._set_channel(config.interface, channels[0])
+            except Exception as exc:
+                initial_control_event = {
+                    "seen_at": time.time(),
+                    "interface": config.interface,
+                    "raw": f"initial channel set failed channel={channels[0]} error={exc}",
+                    "kind": "control_error",
+                    "channel": channels[0],
+                }
 
         session = WiFiMonitorSession(
             id=str(uuid.uuid4()),
@@ -149,6 +159,8 @@ class WiFiMonitorManager:
             current_channel=channels[0] if channels else config.channel,
             _stop=threading.Event(),
         )
+        if initial_control_event:
+            self._append_event(session, initial_control_event)
         self._sessions[session.id] = session
         if config.command == "scapy":
             threading.Thread(target=self._collect_scapy_events, args=(session,), daemon=True).start()
@@ -258,6 +270,9 @@ class WiFiMonitorManager:
                 self._append_event(session, event)
 
         conf.sniff_promisc = True
+        # Monitor interfaces that libpcap/tshark can read may fail through
+        # Scapy's native socket path with ENODEV on some Realtek drivers.
+        conf.use_pcap = True
         while session._stop is not None and not session._stop.is_set():
             try:
                 sniff(
@@ -267,7 +282,6 @@ class WiFiMonitorManager:
                     timeout=1.0,
                 )
             except Exception as exc:
-                session.status = "failed"
                 self._append_event(
                     session,
                     {
@@ -278,6 +292,56 @@ class WiFiMonitorManager:
                     },
                 )
                 time.sleep(1.0)
+        session.status = "stopped"
+
+    def _collect_pyshark_events(self, session: WiFiMonitorSession) -> None:
+        if session.events is None or session._stop is None:
+            return
+        try:
+            import pyshark  # type: ignore
+        except ImportError:
+            session.status = "failed"
+            self._append_event(
+                session,
+                {
+                    "seen_at": time.time(),
+                    "interface": session.config.interface,
+                    "raw": "pyshark is required for WiFi command=pyshark",
+                    "kind": "control_error",
+                },
+            )
+            return
+
+        capture_filter = session.config.capture_filter.strip() or WIFI_DEFAULT_CAPTURE_FILTER
+        while session._stop is not None and not session._stop.is_set():
+            capture = None
+            try:
+                capture = pyshark.LiveCapture(
+                    interface=session.config.interface,
+                    bpf_filter=capture_filter or None,
+                    monitor_mode=False,
+                )
+                for packet in capture.sniff_continuously():
+                    if session._stop is not None and session._stop.is_set():
+                        break
+                    event = self._event_from_pyshark_packet(packet, session)
+                    if event:
+                        self._append_event(session, event)
+            except Exception as exc:
+                self._append_event(
+                    session,
+                    {
+                        "seen_at": time.time(),
+                        "interface": session.config.interface,
+                        "raw": f"pyshark capture failed error={exc}",
+                        "kind": "control_error",
+                    },
+                )
+                time.sleep(1.0)
+            finally:
+                if capture is not None:
+                    with contextlib.suppress(Exception):
+                        capture.close()
         session.status = "stopped"
 
     def _hop_channels(self, session: WiFiMonitorSession) -> None:
@@ -373,8 +437,34 @@ class WiFiMonitorManager:
     @staticmethod
     def _capture_command(config: WiFiMonitorConfig) -> list[str]:
         capture_filter = config.capture_filter.strip() or WIFI_DEFAULT_CAPTURE_FILTER
-        if config.command == "tshark":
-            command = ["tshark", "-i", config.interface, "-l", "-n"]
+        if config.command in {"pyshark", "tshark"}:
+            command = [
+                "tshark",
+                "-i",
+                config.interface,
+                "-l",
+                "-n",
+                "-T",
+                "fields",
+                "-E",
+                "separator=\t",
+                "-e",
+                "frame.time_epoch",
+                "-e",
+                "wlan.sa",
+                "-e",
+                "wlan.da",
+                "-e",
+                "wlan.bssid",
+                "-e",
+                "radiotap.channel.freq",
+                "-e",
+                "radiotap.dbm_antsignal",
+                "-e",
+                "wlan.fc.type_subtype",
+                "-e",
+                "wlan.ssid",
+            ]
             if capture_filter:
                 command.extend(["-f", capture_filter])
             return command
@@ -465,6 +555,8 @@ class WiFiMonitorManager:
         text = line.strip()
         if not text:
             return None
+        if "\t" in text:
+            return WiFiMonitorManager._parse_tshark_fields_line(text, interface)
         lower = text.lower()
         kind = "wifi"
         if "beacon" in lower:
@@ -500,6 +592,55 @@ class WiFiMonitorManager:
             "rssi_dbm": int(rssi_match.group(1)) if rssi_match else None,
             "frequency_mhz": frequency_mhz,
             "channel": WiFiMonitorManager._wifi_channel_from_frequency(frequency_mhz),
+        }
+
+    @staticmethod
+    def _parse_tshark_fields_line(line: str, interface: str) -> dict[str, Any] | None:
+        fields = line.rstrip("\n").split("\t")
+        fields.extend([""] * (8 - len(fields)))
+        seen_raw, source, destination, bssid, freq_raw, rssi_raw, subtype_raw, ssid = fields[:8]
+
+        def clean_mac(value: str) -> str | None:
+            match = re.search(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", value)
+            return match.group(0).lower() if match else None
+
+        source = clean_mac(source) or ""
+        destination = clean_mac(destination) or ""
+        bssid = clean_mac(bssid) or ""
+        frequency_mhz = None
+        with contextlib.suppress(ValueError):
+            frequency_mhz = int(float(freq_raw.split(",", 1)[0]))
+        rssi_dbm = None
+        match = re.search(r"-?\d+", rssi_raw)
+        if match:
+            with contextlib.suppress(ValueError):
+                rssi_dbm = int(match.group(0))
+        ssid = ssid.strip() or None
+        channel = WiFiMonitorManager._wifi_channel_from_frequency(frequency_mhz)
+        kind = WiFiMonitorManager._pyshark_packet_kind(subtype_raw.split(",", 1)[0])
+        raw = WiFiMonitorManager._wifi_compact_summary(
+            kind=kind,
+            ssid=ssid,
+            source=source,
+            destination=destination,
+            bssid=bssid,
+        )
+        try:
+            seen_at = float(seen_raw)
+        except (TypeError, ValueError):
+            seen_at = time.time()
+        return {
+            "seen_at": seen_at,
+            "interface": interface,
+            "raw": raw,
+            "kind": kind,
+            "ssid": ssid,
+            "bssid": bssid,
+            "source": source,
+            "destination": destination,
+            "rssi_dbm": rssi_dbm,
+            "frequency_mhz": frequency_mhz,
+            "channel": channel,
         }
 
     @staticmethod
@@ -553,6 +694,132 @@ class WiFiMonitorManager:
             "frequency_mhz": frequency_mhz,
             "channel": channel,
         }
+
+    @staticmethod
+    def _event_from_pyshark_packet(packet: Any, session: WiFiMonitorSession) -> dict[str, Any] | None:
+        wlan = getattr(packet, "wlan", None)
+        if wlan is None:
+            return None
+        radiotap = getattr(packet, "radiotap", None)
+
+        def field(layer: Any, *names: str) -> str | None:
+            if layer is None:
+                return None
+            for name in names:
+                for candidate in (name, name.replace(".", "_")):
+                    try:
+                        value = getattr(layer, candidate)
+                    except Exception:
+                        value = None
+                    if value is not None:
+                        text = str(value)
+                        if text:
+                            return text
+                    try:
+                        value = layer.get_field_value(name)
+                    except Exception:
+                        value = None
+                    if value is not None:
+                        text = str(value)
+                        if text:
+                            return text
+            return None
+
+        def clean_mac(value: str | None) -> str | None:
+            if not value:
+                return None
+            match = re.search(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", value)
+            return match.group(0).lower() if match else None
+
+        source = clean_mac(field(wlan, "sa", "ta"))
+        destination = clean_mac(field(wlan, "da", "ra"))
+        bssid = clean_mac(field(wlan, "bssid"))
+
+        ssid = field(wlan, "ssid")
+        if ssid in {"<MISSING>", "<EMPTY>", "Wildcard (Broadcast)", "Broadcast"}:
+            ssid = None
+        if ssid:
+            ssid = ssid.strip()
+
+        subtype = field(wlan, "fc.type_subtype", "fc_type_subtype")
+        kind = WiFiMonitorManager._pyshark_packet_kind(subtype)
+        frequency_mhz = None
+        frequency_text = field(radiotap, "channel.freq", "channel_freq", "frequency")
+        if frequency_text:
+            match = re.search(r"\d+", frequency_text)
+            if match:
+                with contextlib.suppress(ValueError):
+                    frequency_mhz = int(match.group(0))
+        channel = WiFiMonitorManager._wifi_channel_from_frequency(frequency_mhz) or session.current_channel
+        if frequency_mhz is None:
+            frequency_mhz = WiFiMonitorManager._frequency_for_channel(channel) if channel is not None else None
+
+        rssi_dbm = None
+        signal_text = field(radiotap, "dbm_antsignal", "dbm_antsignal_dbm", "signal_dbm")
+        if signal_text:
+            match = re.search(r"-?\d+", signal_text)
+            if match:
+                with contextlib.suppress(ValueError):
+                    rssi_dbm = int(match.group(0))
+
+        raw = WiFiMonitorManager._wifi_compact_summary(
+            kind=kind,
+            ssid=ssid,
+            source=source or "",
+            destination=destination or "",
+            bssid=bssid or "",
+        )
+        try:
+            seen_at = float(getattr(packet, "sniff_timestamp", time.time()))
+        except (TypeError, ValueError):
+            seen_at = time.time()
+        return {
+            "seen_at": seen_at,
+            "interface": session.config.interface,
+            "raw": raw,
+            "kind": kind,
+            "ssid": ssid,
+            "bssid": bssid,
+            "source": source,
+            "destination": destination,
+            "rssi_dbm": rssi_dbm,
+            "frequency_mhz": frequency_mhz,
+            "channel": channel,
+        }
+
+    @staticmethod
+    def _pyshark_packet_kind(subtype: str | None) -> str:
+        normalized = (subtype or "").strip().lower()
+        mapping = {
+            "0": "mgmt.association_request",
+            "1": "mgmt.association_response",
+            "2": "mgmt.reassociation_request",
+            "3": "mgmt.reassociation_response",
+            "4": "mgmt.probe_request",
+            "5": "mgmt.probe_response",
+            "8": "mgmt.beacon",
+            "9": "mgmt.atim",
+            "10": "mgmt.disassociation",
+            "11": "mgmt.authentication",
+            "12": "mgmt.deauthentication",
+            "13": "mgmt.action",
+            "24": "ctrl.block_ack_request",
+            "25": "ctrl.block_ack",
+            "26": "ctrl.ps_poll",
+            "27": "ctrl.rts",
+            "28": "ctrl.cts",
+            "29": "ctrl.ack",
+            "30": "ctrl.cf_end",
+            "31": "ctrl.cf_end_ack",
+            "32": "data.data",
+            "36": "data.null",
+            "40": "data.qos_data",
+            "44": "data.qos_null",
+        }
+        if normalized.startswith("0x"):
+            with contextlib.suppress(ValueError):
+                return mapping.get(str(int(normalized, 16)), f"wifi.subtype{int(normalized, 16)}")
+        return mapping.get(normalized, f"wifi.subtype{normalized}" if normalized else "wifi")
 
     @staticmethod
     def _wifi_compact_summary(
@@ -714,8 +981,9 @@ class WiFiMonitorManager:
             except ImportError as exc:
                 raise ValueError("scapy is required for WiFi command=scapy") from exc
             return
-        if shutil.which(config.command) is None:
-            raise ValueError(f"{config.command} is required for WiFi monitor scans")
+        command = "tshark" if config.command == "pyshark" else config.command
+        if shutil.which(command) is None:
+            raise ValueError(f"{command} is required for WiFi monitor scans")
 
     @staticmethod
     def _run_checked(command: list[str]) -> None:

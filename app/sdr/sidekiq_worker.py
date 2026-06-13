@@ -35,7 +35,71 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--duration-seconds", type=int, default=0)
     p.add_argument("--num-samples", type=int, default=0)
     p.add_argument("--card", type=int, default=0)
+    p.add_argument("--lna-gain-db", type=int, default=0)
+    p.add_argument("--vga-gain-db", type=int, default=0)
     return p.parse_args()
+
+
+def _range_bounds(rng, default_min: float, default_max: float) -> tuple[float, float]:
+    try:
+        if isinstance(rng, (tuple, list)) and len(rng) >= 2:
+            return float(rng[0]), float(rng[1])
+        if hasattr(rng, "minimum") and hasattr(rng, "maximum"):
+            min_fn = getattr(rng, "minimum")
+            max_fn = getattr(rng, "maximum")
+            if callable(min_fn) and callable(max_fn):
+                return float(min_fn()), float(max_fn())
+            return float(min_fn), float(max_fn)
+        if hasattr(rng, "min") and hasattr(rng, "max"):
+            return float(getattr(rng, "min")), float(getattr(rng, "max"))
+    except Exception:
+        pass
+    return float(default_min), float(default_max)
+
+
+def _clip_gain(dev, name: str | None, value: float) -> float:
+    try:
+        if name:
+            lo, hi = _range_bounds(dev.getGainRange(SOAPY_SDR_RX, 0, name), 0.0, 76.0)
+        else:
+            lo, hi = _range_bounds(dev.getGainRange(SOAPY_SDR_RX, 0), 0.0, 76.0)
+    except Exception:
+        lo, hi = 0.0, 76.0
+    if hi <= lo:
+        # SoapySidekiq can report 0..0 even though libsidekiq accepts 0..76.
+        lo, hi = 0.0, 76.0
+    return float(min(max(value, lo), hi))
+
+
+def _set_gain(dev, lna_gain_db: int, vga_gain_db: int) -> None:
+    try:
+        dev.setGainMode(SOAPY_SDR_RX, 0, False)
+    except Exception:
+        pass
+    try:
+        names = list(dev.listGains(SOAPY_SDR_RX, 0))
+    except Exception:
+        names = []
+    by_lower = {str(name).lower(): str(name) for name in names}
+    total = float(lna_gain_db + vga_gain_db)
+    for preferred, value in (
+        ("lna", float(lna_gain_db)),
+        ("rx", total),
+        ("tuner", total),
+        ("gain", total),
+    ):
+        actual = by_lower.get(preferred)
+        if not actual:
+            continue
+        try:
+            dev.setGain(SOAPY_SDR_RX, 0, actual, _clip_gain(dev, actual, value))
+            return
+        except Exception:
+            pass
+    try:
+        dev.setGain(SOAPY_SDR_RX, 0, _clip_gain(dev, None, total))
+    except Exception:
+        pass
 
 
 def main() -> int:
@@ -43,7 +107,6 @@ def main() -> int:
     kwargs = {"driver": "sidekiq", "card": str(args.card)}
     dev = SoapySDR.Device(kwargs)
 
-    # Sidekiq gain is often fixed/AGC-controlled in plugin; set what we can safely.
     dev.setFrequency(SOAPY_SDR_RX, 0, float(args.center_freq_hz))
     dev.setSampleRate(SOAPY_SDR_RX, 0, float(args.sample_rate_sps))
     if args.baseband_filter_hz and args.baseband_filter_hz > 0:
@@ -52,6 +115,7 @@ def main() -> int:
         except Exception:
             # Not all drivers expose setBandwidth consistently.
             pass
+    _set_gain(dev, args.lna_gain_db, args.vga_gain_db)
 
     stream = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16)
     dev.activateStream(stream)
@@ -86,7 +150,9 @@ def main() -> int:
 
             # Convert CS16 IQ to int8 IQ expected by current gateway clients.
             iq16 = rx_buf[: n * 2]
-            iq8 = np.clip(np.rint(iq16.astype(np.float32) / 64.0), -128, 127).astype(np.int8, copy=False)
+            # Sidekiq delivers 12-bit ADC samples sign-extended into int16.
+            # Scale +/-2048 into the int8 IQ format used by sdr-gateway.
+            iq8 = np.clip(np.rint(iq16.astype(np.float32) / 16.0), -128, 127).astype(np.int8, copy=False)
             out.write(iq8.tobytes())
             produced_samples += n
     finally:

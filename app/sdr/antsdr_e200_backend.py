@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -13,6 +15,7 @@ ANTSDR_E200_URI = os.getenv("ANTSDR_E200_URI", "ip:192.168.1.10").strip() or "ip
 ANTSDR_E200_FREQ_MIN = 70_000_000
 ANTSDR_E200_FREQ_MAX = 6_000_000_000
 ANTSDR_E200_MAX_SAMPLE_RATE = 61_440_000
+ANTSDR_E200_IIO_PORT = int(os.getenv("ANTSDR_E200_IIO_PORT", "30431"))
 
 
 def _split_device_index(device_id: str) -> int:
@@ -22,43 +25,55 @@ def _split_device_index(device_id: str) -> int:
         raise RuntimeError(f"invalid antsdre200 device id: {device_id}") from exc
 
 
+def _host_from_uri(uri: str) -> str | None:
+    text = uri.strip()
+    if not text:
+        return None
+    if text.startswith("ip:"):
+        return text.split(":", 1)[1].strip() or None
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    return text.split("/", 1)[0].split(":", 1)[0].strip() or None
+
+
+def _host_reachable(host: str | None) -> bool:
+    if not host:
+        return False
+    ping = shutil.which("ping")
+    if ping:
+        result = subprocess.run(
+            [ping, "-c", "1", "-W", "1", host],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+        return result.returncode == 0
+    try:
+        with socket.create_connection((host, ANTSDR_E200_IIO_PORT), timeout=0.75):
+            return True
+    except OSError:
+        return False
+
+
 class AntSDRE200Backend(SDRBackend):
     def list_devices(self) -> list[Device]:
         notes = (
             "Libiio-backed AD9361 control via pyadi-iio. "
             f"Configured URI: {ANTSDR_E200_URI}."
         )
+        host = _host_from_uri(ANTSDR_E200_URI)
+        if not _host_reachable(host):
+            return []
         try:
             import adi  # type: ignore
         except Exception:
-            return [
-                Device(
-                    id="antsdre200:0",
-                    driver="antsdre200",
-                    label=f"AntSDR E200 :: {ANTSDR_E200_URI}",
-                    serial=None,
-                    freq_min_hz=ANTSDR_E200_FREQ_MIN,
-                    freq_max_hz=ANTSDR_E200_FREQ_MAX,
-                    max_sample_rate_sps=ANTSDR_E200_MAX_SAMPLE_RATE,
-                    notes=notes + " Local discovery is unavailable because pyadi-iio/libiio is not installed.",
-                )
-            ]
+            return []
 
         try:
             sdr = adi.ad9361(uri=ANTSDR_E200_URI)
         except Exception:
-            return [
-                Device(
-                    id="antsdre200:0",
-                    driver="antsdre200",
-                    label=f"AntSDR E200 :: {ANTSDR_E200_URI}",
-                    serial=None,
-                    freq_min_hz=ANTSDR_E200_FREQ_MIN,
-                    freq_max_hz=ANTSDR_E200_FREQ_MAX,
-                    max_sample_rate_sps=ANTSDR_E200_MAX_SAMPLE_RATE,
-                    notes=notes + " Board connection could not be verified right now.",
-                )
-            ]
+            return []
 
         try:
             firmware = getattr(sdr, "firmware_version", "") or ""

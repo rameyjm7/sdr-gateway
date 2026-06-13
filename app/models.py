@@ -258,7 +258,7 @@ class WiFiMonitorConfig(BaseModel):
     active_scan: bool = False
     active_scan_interval_s: float = Field(default=60.0, ge=5.0, le=3600.0)
     capture_filter: str = Field(default="", max_length=500)
-    command: str = Field(default="scapy", pattern="^(scapy|tcpdump|tshark)$")
+    command: str = Field(default="scapy", pattern="^(scapy|pyshark|tcpdump|tshark)$")
     max_events: int = Field(default=500, ge=10, le=10000)
     replace_existing: bool = False
     model_config = {

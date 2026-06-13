@@ -106,7 +106,7 @@ def _parse_args() -> argparse.Namespace:
         help="Hop channels from this CLI process when --set-channel is not used. Default: enabled.",
     )
     parser.add_argument("--no-local-hop", dest="local_hop", action="store_false")
-    parser.add_argument("--command", choices=("scapy", "tcpdump", "tshark"), default="scapy")
+    parser.add_argument("--command", choices=("scapy", "pyshark", "tcpdump", "tshark"), default="scapy")
     parser.add_argument("--capture-filter", default="")
     parser.add_argument("--poll-s", type=float, default=0.25)
     parser.add_argument("--event-limit", type=int, default=500)
@@ -114,9 +114,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--scan-id", default="", help="Attach to an existing gateway WiFi scan.")
     parser.add_argument(
         "--replace-existing",
+        dest="replace_existing",
         action="store_true",
+        default=True,
         help="Stop existing gateway WiFi scans on this interface before starting.",
     )
+    parser.add_argument("--no-replace-existing", dest="replace_existing", action="store_false")
     parser.add_argument("--json", action="store_true", help="Print one JSON event per line instead of CSV.")
     parser.add_argument("--no-header", action="store_true")
     parser.add_argument("--once", action="store_true", help="Print current events once and exit.")

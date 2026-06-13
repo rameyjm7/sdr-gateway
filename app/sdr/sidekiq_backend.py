@@ -42,9 +42,9 @@ class SidekiqBackend(SDRBackend):
         return devices
 
     def start_stream(self, request: StreamRequest):
-        worker = Path(__file__).with_name("soapy_worker.py")
+        worker = Path(__file__).with_name("sidekiq_worker.py")
         if not worker.exists():
-            raise RuntimeError(f"soapy worker not found: {worker}")
+            raise RuntimeError(f"sidekiq worker not found: {worker}")
 
         try:
             device_index = int(request.device_id.split(":", 1)[1])
@@ -54,9 +54,7 @@ class SidekiqBackend(SDRBackend):
         cmd = [
             sys.executable,
             str(worker),
-            "--driver",
-            "sidekiq",
-            "--device-index",
+            "--card",
             str(device_index),
             "--center-freq-hz",
             str(request.center_freq_hz),
