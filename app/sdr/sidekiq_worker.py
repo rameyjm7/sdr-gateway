@@ -148,12 +148,11 @@ def main() -> int:
             if n <= 0:
                 continue
 
-            # Convert CS16 IQ to int8 IQ expected by current gateway clients.
+            # Sidekiq delivers signed interleaved CS16 IQ.
+            # Keep the native int16 payload so Sidekiq-aware clients can
+            # preserve the full dynamic range instead of forcing int8.
             iq16 = rx_buf[: n * 2]
-            # Sidekiq delivers 12-bit ADC samples sign-extended into int16.
-            # Scale +/-2048 into the int8 IQ format used by sdr-gateway.
-            iq8 = np.clip(np.rint(iq16.astype(np.float32) / 16.0), -128, 127).astype(np.int8, copy=False)
-            out.write(iq8.tobytes())
+            out.write(iq16.tobytes())
             produced_samples += n
     finally:
         try:

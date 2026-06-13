@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, replace
 import json
 import os
 import sys
-from dataclasses import dataclass
 from typing import Any
 from urllib import error, request
 
@@ -34,6 +34,9 @@ class ProbeResult:
     freq_min_hz: int
     freq_max_hz: int
     max_sample_rate_sps: int
+    freq_range: str = ""
+    sample_rate_range: str = ""
+    gain_ranges: str = ""
 
 
 def _parse_args() -> argparse.Namespace:
@@ -139,6 +142,195 @@ def _probe_local_registry() -> tuple[list[ProbeResult], str]:
     return results, "gateway API unreachable; busy status unavailable without a running server"
 
 
+def _load_soapysdr():
+    try:
+        import SoapySDR  # type: ignore
+        from SoapySDR import SOAPY_SDR_RX  # type: ignore
+
+        return SoapySDR, SOAPY_SDR_RX
+    except Exception:
+        ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+        fallback = f"/usr/local/lib/python{ver}/site-packages"
+        if os.path.exists(fallback) and fallback not in sys.path:
+            sys.path.append(fallback)
+        try:
+            import SoapySDR  # type: ignore
+            from SoapySDR import SOAPY_SDR_RX  # type: ignore
+
+            return SoapySDR, SOAPY_SDR_RX
+        except Exception:
+            return None, None
+
+
+def _range_triplets(ranges_obj: Any) -> list[tuple[float, float, float | None]]:
+    triplets: list[tuple[float, float, float | None]] = []
+    try:
+        iterable = list(ranges_obj)
+    except Exception:
+        iterable = [ranges_obj]
+    for item in iterable:
+        try:
+            if isinstance(item, (tuple, list)) and len(item) >= 2:
+                start = float(item[0])
+                stop = float(item[1])
+                step = float(item[2]) if len(item) >= 3 else None
+            else:
+                min_fn = getattr(item, "minimum", None)
+                max_fn = getattr(item, "maximum", None)
+                step_fn = getattr(item, "step", None)
+                start = float(min_fn() if callable(min_fn) else min_fn)
+                stop = float(max_fn() if callable(max_fn) else max_fn)
+                step = step_fn() if callable(step_fn) else step_fn
+                step = float(step) if step is not None else None
+        except Exception:
+            continue
+        if stop < start:
+            start, stop = stop, start
+        triplets.append((start, stop, step))
+    return triplets
+
+
+def _format_rate(value: float) -> str:
+    value = float(value)
+    abs_value = abs(value)
+    if abs_value >= 1_000_000:
+        return f"{value / 1_000_000:.3f} MS/s"
+    if abs_value >= 1_000:
+        return f"{value / 1_000:.3f} kS/s"
+    return f"{value:.0f} S/s"
+
+
+def _format_hz(value: float) -> str:
+    value = float(value)
+    abs_value = abs(value)
+    if abs_value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.3f} GHz"
+    if abs_value >= 1_000_000:
+        return f"{value / 1_000_000:.3f} MHz"
+    if abs_value >= 1_000:
+        return f"{value / 1_000:.3f} kHz"
+    return f"{value:.0f} Hz"
+
+
+def _format_triplets(triplets: list[tuple[float, float, float | None]], formatter) -> str:
+    if not triplets:
+        return "-"
+    point_values = [start for start, stop, _step in triplets if abs(float(start) - float(stop)) <= 1e-9]
+    if len(point_values) == len(triplets) and len(point_values) >= 6:
+        values = sorted(set(float(value) for value in point_values))
+        if len(values) >= 3:
+            deltas = [round(values[index + 1] - values[index], 6) for index in range(len(values) - 1)]
+            step = deltas[0]
+            if step > 0 and all(abs(delta - step) <= max(1e-6, abs(step) * 0.001) for delta in deltas[1:]):
+                return f"{formatter(values[0])} .. {formatter(values[-1])} (step {formatter(step)})"
+    parts: list[str] = []
+    for start, stop, step in triplets:
+        chunk = f"{formatter(start)} .. {formatter(stop)}"
+        if step and step > 0:
+            chunk = f"{chunk} (step {formatter(step)})"
+        parts.append(chunk)
+    return "; ".join(parts)
+
+
+def _default_probe_detail(row: ProbeResult) -> ProbeResult:
+    return replace(
+        row,
+        freq_range=_format_triplets([(float(row.freq_min_hz), float(row.freq_max_hz), None)], _format_hz),
+        sample_rate_range=f"max {_format_rate(float(row.max_sample_rate_sps))}",
+        gain_ranges="-",
+    )
+
+
+def _inspect_soapy_probe_detail(row: ProbeResult) -> ProbeResult:
+    SoapySDR, SOAPY_SDR_RX = _load_soapysdr()
+    if SoapySDR is None or row.driver in {"hackrf", "antsdre200", "mock"}:
+        return _default_probe_detail(row)
+
+    previous_log_level = None
+    try:
+        previous_log_level = SoapySDR.getLogLevel()
+        warning_level = getattr(SoapySDR, "SOAPY_SDR_WARNING", None)
+        if warning_level is not None:
+            SoapySDR.setLogLevel(warning_level)
+    except Exception:
+        previous_log_level = None
+
+    try:
+        try:
+            matches = [dict(match) for match in SoapySDR.Device.enumerate({"driver": row.driver})]
+        except Exception:
+            return _default_probe_detail(row)
+        if not matches:
+            return _default_probe_detail(row)
+
+        chosen = None
+        serial = (row.serial or "").strip()
+        if serial:
+            for match in matches:
+                if str(match.get("serial", "")).strip() == serial:
+                    chosen = match
+                    break
+        if chosen is None:
+            try:
+                index = int(row.id.split(":", 1)[1])
+            except Exception:
+                index = 0
+            chosen = matches[min(max(index, 0), len(matches) - 1)]
+
+        try:
+            dev = SoapySDR.Device(dict(chosen))
+        except Exception:
+            return _default_probe_detail(row)
+
+        try:
+            freq_ranges = _range_triplets(dev.getFrequencyRange(SOAPY_SDR_RX, 0))
+        except Exception:
+            freq_ranges = []
+        try:
+            sample_rate_ranges = _range_triplets(dev.getSampleRateRange(SOAPY_SDR_RX, 0))
+        except Exception:
+            sample_rate_ranges = []
+
+        gain_parts: list[str] = []
+        try:
+            gain_names = [str(name) for name in dev.listGains(SOAPY_SDR_RX, 0)]
+        except Exception:
+            gain_names = []
+        for gain_name in gain_names:
+            try:
+                gain_triplets = _range_triplets(dev.getGainRange(SOAPY_SDR_RX, 0, gain_name))
+            except Exception:
+                gain_triplets = []
+            formatted = _format_triplets(gain_triplets, lambda value: f"{value:.1f} dB")
+            if formatted != "-":
+                gain_parts.append(f"{gain_name}: {formatted}")
+        if not gain_parts:
+            try:
+                overall_gains = _range_triplets(dev.getGainRange(SOAPY_SDR_RX, 0))
+            except Exception:
+                overall_gains = []
+            overall = _format_triplets(overall_gains, lambda value: f"{value:.1f} dB")
+            if overall != "-":
+                gain_parts.append(f"total: {overall}")
+
+        return replace(
+            row,
+            freq_range=_format_triplets(freq_ranges, _format_hz) or _default_probe_detail(row).freq_range,
+            sample_rate_range=_format_triplets(sample_rate_ranges, _format_rate) or _default_probe_detail(row).sample_rate_range,
+            gain_ranges="; ".join(gain_parts) if gain_parts else "-",
+        )
+    finally:
+        if previous_log_level is not None:
+            try:
+                SoapySDR.setLogLevel(previous_log_level)
+            except Exception:
+                pass
+
+
+def _enrich_probe_rows(rows: list[ProbeResult]) -> list[ProbeResult]:
+    return [_inspect_soapy_probe_detail(row) for row in rows]
+
+
 def _filter_rows(rows: list[ProbeResult], selector: str) -> list[ProbeResult]:
     selector = selector.strip().lower()
     if not selector:
@@ -152,7 +344,7 @@ def _filter_rows(rows: list[ProbeResult], selector: str) -> list[ProbeResult]:
 
 
 def _format_table(rows: list[ProbeResult]) -> str:
-    headers = ("ID", "Driver", "Label", "Busy", "Owner", "Serial", "Notes")
+    headers = ("ID", "Driver", "Label", "Busy", "Owner", "Serial", "Freq Range", "SR Range", "Gain Ranges", "Notes")
     body = [
         (
             row.id,
@@ -161,6 +353,9 @@ def _format_table(rows: list[ProbeResult]) -> str:
             row.busy,
             row.owner,
             row.serial,
+            row.freq_range,
+            row.sample_rate_range,
+            row.gain_ranges,
             row.notes,
         )
         for row in rows
@@ -190,6 +385,9 @@ def _format_entries(rows: list[ProbeResult]) -> str:
                     f"  busy:   {row.busy}",
                     f"  owner:  {row.owner or '-'}",
                     f"  serial: {row.serial or '-'}",
+                    f"  freq:   {row.freq_range or '-'}",
+                    f"  sr:     {row.sample_rate_range or '-'}",
+                    f"  gains:  {row.gain_ranges or '-'}",
                     f"  notes:  {row.notes or '-'}",
                 ]
             )
@@ -277,6 +475,7 @@ def _run_probe(args: argparse.Namespace) -> int:
     if not rows:
         print("No matching SDR devices found.")
         return 1
+    rows = _enrich_probe_rows(rows)
 
     _print_probe_rows(rows, note, args.format)
 

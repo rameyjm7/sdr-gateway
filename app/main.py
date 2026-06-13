@@ -45,6 +45,7 @@ from app.models import (
 )
 from app.observability import Metrics, configure_logging
 from app.sdr.registry import BackendRegistry
+from app.sdr.sidekiq_driver import ensure_sidekiq_driver_loaded
 from app.services import DEFAULT_STREAM_CHUNK_BYTES, IQSweepManager, StreamManager, SweepManager, TxManager, WiFiMonitorManager
 
 settings = get_settings()
@@ -56,6 +57,7 @@ metrics = Metrics()
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     try:
+        ensure_sidekiq_driver_loaded()
         logger.info(
             "gateway_start",
             extra={
