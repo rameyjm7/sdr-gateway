@@ -180,6 +180,21 @@ def test_read_chunk_after_stream_removed_returns_empty_chunk():
     assert backend.stream_stops == 1
 
 
+def test_stream_cursors_fan_out_same_buffered_iq_to_multiple_consumers():
+    backend = _Backend()
+    backend.stream_processes = [_Proc(stdout=io.BytesIO(b"shared IQ"), returncode=0)]
+    manager = StreamManager(_Registry(backend))
+    session = manager.start(_stream_config().model_copy(update={"num_samples": 1024}))
+    first = manager.create_cursor(session.id, start="oldest")
+    second = manager.create_cursor(session.id, start="oldest")
+
+    first_chunk = asyncio.run(manager.read_chunk(session.id, nbytes=64, cursor_id=first))
+    second_chunk = asyncio.run(manager.read_chunk(session.id, nbytes=64, cursor_id=second))
+
+    assert first_chunk == b"shared IQ"
+    assert second_chunk == b"shared IQ"
+
+
 def test_finite_stream_does_not_restart_at_eof():
     backend = _Backend()
     backend.stream_processes = [_Proc(stdout=io.BytesIO(), returncode=0)]

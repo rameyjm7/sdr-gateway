@@ -480,10 +480,14 @@ async def iq_stream(stream_id: str, websocket: WebSocket):
         return
 
     keep_stream = websocket.query_params.get("keep", "").strip().lower() in {"1", "true", "yes"}
+    start_mode = websocket.query_params.get("start", "latest").strip().lower()
+    if start_mode not in {"latest", "oldest"}:
+        start_mode = "latest"
+    cursor_id = stream_manager.create_cursor(stream_id, start=start_mode)
     await websocket.accept()
     try:
         while True:
-            chunk = await stream_manager.read_chunk(stream_id)
+            chunk = await stream_manager.read_chunk(stream_id, cursor_id=cursor_id)
             if not chunk:
                 try:
                     session = stream_manager.get(stream_id)
@@ -539,6 +543,7 @@ async def iq_stream(stream_id: str, websocket: WebSocket):
             },
         )
     finally:
+        stream_manager.release_cursor(stream_id, cursor_id)
         if not keep_stream:
             # Ensure ordinary dropped/refreshing clients don't leave orphan SDR processes running.
             try:

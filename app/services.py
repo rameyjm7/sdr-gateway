@@ -26,6 +26,7 @@ from app.sdr.backend import Device, IQSweepRequest, StreamRequest, SweepRequest,
 logger = logging.getLogger(__name__)
 
 DEFAULT_STREAM_CHUNK_BYTES = int(os.getenv("SDR_GATEWAY_STREAM_CHUNK_BYTES", str(64 * 1024)))
+DEFAULT_STREAM_RING_BYTES = int(os.getenv("SDR_GATEWAY_STREAM_RING_BYTES", str(32 * 1024 * 1024)))
 WIFI_DEFAULT_CAPTURE_FILTER = os.getenv(
     "SDR_GATEWAY_WIFI_CAPTURE_FILTER",
     "type mgt or type data",
@@ -1020,6 +1021,13 @@ class StreamSession:
     retuned_at: float = 0.0
     restart_count: int = 0
     restart_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    buffer: deque[tuple[int, bytes]] = field(default_factory=deque, repr=False)
+    buffer_bytes: int = 0
+    next_seq: int = 0
+    cursors: dict[str, int] = field(default_factory=dict, repr=False)
+    condition: threading.Condition = field(default_factory=threading.Condition, repr=False)
+    stop_reader: threading.Event = field(default_factory=threading.Event, repr=False)
+    reader_thread: threading.Thread | None = field(default=None, repr=False)
 
 
 class StreamManager:
@@ -1040,6 +1048,7 @@ class StreamManager:
         stream_id = str(uuid.uuid4())
         session = StreamSession(id=stream_id, config=config, process=process, retuned_at=time.time())
         self._sessions[stream_id] = session
+        self._start_reader(session)
         return session
 
     def retune(self, stream_id: str, config: StreamConfig) -> StreamSession:
@@ -1051,6 +1060,7 @@ class StreamManager:
         backend = self._registry.backend_for_device(config.device_id)
         session.status = "retuning"
         old_process = session.process
+        self._stop_reader(session)
         backend.stop_stream(old_process)
         try:
             process = backend.start_stream(self._stream_request(config))
@@ -1061,15 +1071,26 @@ class StreamManager:
         session.config = config
         session.status = "running"
         session.retuned_at = time.time()
+        with session.condition:
+            session.buffer.clear()
+            session.buffer_bytes = 0
+            session.next_seq += 1
+            session.cursors = {cursor_id: session.next_seq for cursor_id in session.cursors}
+            session.condition.notify_all()
+        session.stop_reader = threading.Event()
+        self._start_reader(session)
         return session
 
     def stop(self, stream_id: str) -> None:
         session = self._sessions.pop(stream_id)
         backend = self._registry.backend_for_device(session.config.device_id)
         try:
+            self._stop_reader(session)
             backend.stop_stream(session.process)
         finally:
             session.status = "stopped"
+            with session.condition:
+                session.condition.notify_all()
 
     def stop_all(self) -> None:
         for stream_id in list(self._sessions.keys()):
@@ -1078,32 +1099,126 @@ class StreamManager:
             except Exception:
                 continue
 
-    async def read_chunk(self, stream_id: str, nbytes: int = DEFAULT_STREAM_CHUNK_BYTES) -> bytes:
-        retry_deadline = time.monotonic() + 1.5
+    def create_cursor(self, stream_id: str, *, start: str = "latest") -> str:
+        session = self._sessions[stream_id]
+        cursor_id = str(uuid.uuid4())
+        with session.condition:
+            if start == "oldest" and session.buffer:
+                session.cursors[cursor_id] = session.buffer[0][0]
+            else:
+                session.cursors[cursor_id] = session.next_seq
+        return cursor_id
+
+    def release_cursor(self, stream_id: str, cursor_id: str) -> None:
+        session = self._sessions.get(stream_id)
+        if session is None:
+            return
+        with session.condition:
+            session.cursors.pop(cursor_id, None)
+
+    async def read_chunk(
+        self,
+        stream_id: str,
+        nbytes: int = DEFAULT_STREAM_CHUNK_BYTES,
+        cursor_id: str | None = None,
+    ) -> bytes:
+        return await asyncio.to_thread(self._read_chunk_blocking, stream_id, nbytes, cursor_id or "_default")
+
+    def _start_reader(self, session: StreamSession) -> None:
+        thread = threading.Thread(target=self._reader_loop, args=(session,), daemon=True)
+        session.reader_thread = thread
+        thread.start()
+
+    def _stop_reader(self, session: StreamSession) -> None:
+        session.stop_reader.set()
+        with session.condition:
+            session.condition.notify_all()
+        thread = session.reader_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+
+    def _append_stream_chunk(self, session: StreamSession, chunk: bytes) -> None:
+        if not chunk:
+            return
+        with session.condition:
+            seq = session.next_seq
+            session.next_seq += 1
+            session.buffer.append((seq, bytes(chunk)))
+            session.buffer_bytes += len(chunk)
+            while session.buffer and session.buffer_bytes > DEFAULT_STREAM_RING_BYTES:
+                old_seq, old_chunk = session.buffer.popleft()
+                session.buffer_bytes -= len(old_chunk)
+                for cursor_id, cursor_seq in list(session.cursors.items()):
+                    if cursor_seq <= old_seq:
+                        session.cursors[cursor_id] = old_seq + 1
+            session.condition.notify_all()
+
+    def _reader_loop(self, session: StreamSession) -> None:
+        while not session.stop_reader.is_set():
+            if self._sessions.get(session.id) is not session:
+                break
+            stdout = session.process.stdout
+            if stdout is None:
+                break
+            try:
+                chunk = stdout.read(DEFAULT_STREAM_CHUNK_BYTES)
+            except Exception as exc:
+                logger.warning("stream_reader_failed stream_id=%s error=%s", session.id, exc)
+                chunk = b""
+            if chunk:
+                self._append_stream_chunk(session, chunk)
+                continue
+            if session.stop_reader.is_set() or self._sessions.get(session.id) is not session:
+                break
+            if session.status == "retuning" or (time.time() - session.retuned_at) < 1.0:
+                time.sleep(0.05)
+                continue
+            if session.process.poll() is not None and self._is_continuous(session.config):
+                restarted = self._restart_stream(session, session.process)
+                if restarted:
+                    continue
+            break
+        with session.condition:
+            if session.status == "running" and self._sessions.get(session.id) is session and not session.stop_reader.is_set():
+                session.status = "stopped"
+            session.condition.notify_all()
+
+    def _read_chunk_blocking(self, stream_id: str, nbytes: int, cursor_id: str) -> bytes:
+        deadline = time.monotonic() + 2.0
         while True:
             session = self._sessions.get(stream_id)
             if session is None:
                 return b""
-            process = session.process
-            stdout = process.stdout
-            if stdout is None:
-                return b""
-            chunk = await asyncio.to_thread(stdout.read, nbytes)
-            if self._sessions.get(stream_id) is not session:
-                return b""
-            if chunk:
-                return chunk
-            if session.status == "retuning" or (time.time() - session.retuned_at) < 1.0:
-                if time.monotonic() < retry_deadline:
-                    await asyncio.sleep(0.05)
-                    continue
-            if process.poll() is not None and self._is_continuous(session.config):
-                restarted = await asyncio.to_thread(self._restart_stream, session, process)
-                if restarted:
-                    retry_deadline = time.monotonic() + 1.5
-                    await asyncio.sleep(0.1)
-                    continue
-            return b""
+            with session.condition:
+                if cursor_id not in session.cursors:
+                    session.cursors[cursor_id] = session.buffer[0][0] if session.buffer else session.next_seq
+                while True:
+                    cursor_seq = session.cursors.get(cursor_id, session.next_seq)
+                    if session.buffer and cursor_seq < session.buffer[0][0]:
+                        cursor_seq = session.buffer[0][0]
+                        session.cursors[cursor_id] = cursor_seq
+                    selected: list[bytes] = []
+                    next_cursor = cursor_seq
+                    total = 0
+                    for seq, chunk in session.buffer:
+                        if seq < cursor_seq:
+                            continue
+                        if selected and total + len(chunk) > nbytes:
+                            break
+                        selected.append(chunk)
+                        total += len(chunk)
+                        next_cursor = seq + 1
+                        if total >= nbytes:
+                            break
+                    if selected:
+                        session.cursors[cursor_id] = next_cursor
+                        return b"".join(selected)
+                    if session.status not in {"running", "retuning"}:
+                        return b""
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return b""
+                    session.condition.wait(timeout=min(0.1, remaining))
 
     async def probe(self, config: StreamConfig, capture_count: int = 2, chunk_size: int = 16384) -> dict[str, Any]:
         session = self.start(config)
@@ -1399,6 +1514,7 @@ class IQSweepSession:
     status: str = "running"
     retuned_at: float = 0.0
     native_buffer: bytes = b""
+    stream_cursor_id: str | None = None
 
     @property
     def current_center_freq_hz(self) -> int:
@@ -1459,6 +1575,7 @@ class IQSweepManager:
             config=config,
             centers_hz=centers_hz,
             retuned_at=time.time(),
+            stream_cursor_id=self._stream_manager.create_cursor(stream.id, start="oldest"),
         )
         self._sessions[iq_sweep_id] = session
         return session
@@ -1473,6 +1590,8 @@ class IQSweepManager:
                 session.status = "stopped"
         else:
             try:
+                if session.stream_cursor_id:
+                    self._stream_manager.release_cursor(session.stream_id, session.stream_cursor_id)
                 self._stream_manager.stop(session.stream_id)
             finally:
                 session.status = "stopped"
@@ -1490,7 +1609,11 @@ class IQSweepManager:
             return await self._read_native_chunk(session)
         if time.time() - session.retuned_at >= float(session.config.dwell_s):
             self._advance(session)
-        chunk = await self._stream_manager.read_chunk(session.stream_id, nbytes=nbytes)
+        chunk = await self._stream_manager.read_chunk(
+            session.stream_id,
+            nbytes=nbytes,
+            cursor_id=session.stream_cursor_id,
+        )
         if not chunk:
             return self._chunk_payload(session, b"")
         return self._chunk_payload(session, chunk)
