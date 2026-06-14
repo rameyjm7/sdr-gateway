@@ -14,6 +14,7 @@ pytestmark = pytest.mark.unit
 class _FakeProcess:
     def __init__(self, returncode: int | None, stderr: bytes = b"") -> None:
         self.returncode = returncode
+        self.stdin = io.BytesIO()
         self.stdout = io.BytesIO()
         self.stderr = io.BytesIO(stderr)
         self.pid = id(self) % 100000
@@ -73,6 +74,7 @@ def test_continuous_stream_recovers_gateway_owned_busy_child(monkeypatch):
         return processes.pop(0)
 
     monkeypatch.setattr(hackrf_backend, "_cmd_available", lambda _command: True)
+    monkeypatch.setattr(hackrf_backend.os.path, "exists", lambda _path: False)
     monkeypatch.setattr(hackrf_backend, "_popen_iq_stream", fake_popen)
     monkeypatch.setattr(hackrf_backend.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
@@ -97,6 +99,7 @@ def test_finite_stream_does_not_wait_for_startup_probe(monkeypatch):
         return _FakeProcess(returncode=0)
 
     monkeypatch.setattr(hackrf_backend, "_cmd_available", lambda _command: True)
+    monkeypatch.setattr(hackrf_backend.os.path, "exists", lambda _path: False)
     monkeypatch.setattr(hackrf_backend, "_popen_iq_stream", fake_popen)
     monkeypatch.setattr(hackrf_backend.time, "sleep", lambda seconds: sleep_calls.append(seconds))
 
@@ -105,6 +108,32 @@ def test_finite_stream_does_not_wait_for_startup_probe(monkeypatch):
     assert process.poll() == 0
     assert len(popen_calls) == 1
     assert sleep_calls == []
+
+
+def test_stream_prefers_native_persistent_worker_when_built(monkeypatch):
+    popen_calls = []
+
+    def fake_popen(cmd, **_kwargs):
+        popen_calls.append((cmd, _kwargs))
+        return _FakeProcess(returncode=None)
+
+    monkeypatch.setattr(
+        hackrf_backend.os.path,
+        "exists",
+        lambda path: path == hackrf_backend.HACKRF_STREAM_BIN,
+    )
+    monkeypatch.setattr(hackrf_backend.subprocess, "Popen", fake_popen)
+
+    process = HackRFBackend().start_stream(_stream_request())
+
+    assert process.poll() is None
+    cmd, kwargs = popen_calls[0]
+    assert cmd[0].endswith("hackrf_stream")
+    assert "--center-freq-hz" in cmd
+    assert "--sample-rate-sps" in cmd
+    assert kwargs["stdin"] == hackrf_backend.subprocess.PIPE
+    assert HackRFBackend().retune_stream(process, _stream_request(center_freq_hz=101_100_000))
+    assert b"101100000" in process._process.stdin.getvalue()
 
 
 def test_iq_sweep_uses_native_worker(monkeypatch):

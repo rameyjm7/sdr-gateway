@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from app.sdr.backend import Device, SDRBackend, StreamRequest, SweepRequest, TxBurstRequest
+from app.sdr.controlled_process import ControlledStreamProcess
 from app.sdr.soapy_utils import find_driver_devices
 
 
@@ -73,13 +74,19 @@ class RTLSDRBackend(SDRBackend):
         if request.num_samples:
             cmd.extend(["--num-samples", str(request.num_samples)])
 
-        return subprocess.Popen(
+        process = subprocess.Popen(
             cmd,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
             text=False,
         )
+        return ControlledStreamProcess(process)
+
+    def retune_stream(self, process, request: StreamRequest) -> bool:
+        retune = getattr(process, "retune", None)
+        return bool(retune and retune(request))
 
     def stop_stream(self, process) -> None:
         if process.poll() is None:

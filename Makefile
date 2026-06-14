@@ -10,11 +10,15 @@ install-dev:
 	$(PYTHON) -m pip install -r requirements-dev.txt
 	$(PYTHON) -m pip install -e .
 
-native: $(NATIVE_BIN_DIR)/hackrf_iq_sweep
+native: $(NATIVE_BIN_DIR)/hackrf_iq_sweep $(NATIVE_BIN_DIR)/hackrf_stream
 
 $(NATIVE_BIN_DIR)/hackrf_iq_sweep: $(NATIVE_DIR)/hackrf_iq_sweep.c
 	mkdir -p $(NATIVE_BIN_DIR)
 	$(CC) -O2 -Wall -Wextra -o $@ $< $$(pkg-config --cflags --libs libhackrf)
+
+$(NATIVE_BIN_DIR)/hackrf_stream: $(NATIVE_DIR)/hackrf_stream.c
+	mkdir -p $(NATIVE_BIN_DIR)
+	$(CC) -O2 -Wall -Wextra -o $@ $< $$(pkg-config --cflags --libs libhackrf) -lpthread
 
 clean-native:
 	rm -rf $(NATIVE_BIN_DIR)

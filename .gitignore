@@ -9,3 +9,4 @@ reports/
 .coverage
 htmlcov/
 .env
+app/sdr/native/bin/

@@ -1059,11 +1059,25 @@ class StreamManager:
 
         backend = self._registry.backend_for_device(config.device_id)
         session.status = "retuning"
+        request = self._stream_request(config)
+        retune_stream = getattr(backend, "retune_stream", None)
+        if (
+            retune_stream is not None
+            and self._is_continuous(session.config)
+            and self._is_continuous(config)
+            and retune_stream(session.process, request)
+        ):
+            session.config = config
+            session.status = "running"
+            session.retuned_at = time.time()
+            self._clear_stream_buffer(session)
+            return session
+
         old_process = session.process
         self._stop_reader(session)
         backend.stop_stream(old_process)
         try:
-            process = backend.start_stream(self._stream_request(config))
+            process = backend.start_stream(request)
         except Exception:
             session.status = "stopped"
             raise
@@ -1071,12 +1085,7 @@ class StreamManager:
         session.config = config
         session.status = "running"
         session.retuned_at = time.time()
-        with session.condition:
-            session.buffer.clear()
-            session.buffer_bytes = 0
-            session.next_seq += 1
-            session.cursors = {cursor_id: session.next_seq for cursor_id in session.cursors}
-            session.condition.notify_all()
+        self._clear_stream_buffer(session)
         session.stop_reader = threading.Event()
         self._start_reader(session)
         return session
@@ -1151,6 +1160,14 @@ class StreamManager:
                 for cursor_id, cursor_seq in list(session.cursors.items()):
                     if cursor_seq <= old_seq:
                         session.cursors[cursor_id] = old_seq + 1
+            session.condition.notify_all()
+
+    def _clear_stream_buffer(self, session: StreamSession) -> None:
+        with session.condition:
+            session.buffer.clear()
+            session.buffer_bytes = 0
+            session.next_seq += 1
+            session.cursors = {cursor_id: session.next_seq for cursor_id in session.cursors}
             session.condition.notify_all()
 
     def _reader_loop(self, session: StreamSession) -> None:

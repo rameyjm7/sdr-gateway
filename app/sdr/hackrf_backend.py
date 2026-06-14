@@ -10,6 +10,7 @@ import time
 from typing import Iterable
 
 from app.sdr.backend import Device, IQSweepRequest, SDRBackend, StreamRequest, SweepRequest, TxBurstRequest
+from app.sdr.controlled_process import ControlledStreamProcess
 
 
 HACKRF_FREQ_MIN = 1_000_000
@@ -17,6 +18,7 @@ HACKRF_FREQ_MAX = 6_000_000_000
 HACKRF_MAX_SAMPLE_RATE = 20_000_000
 HACKRF_STARTUP_CHECK_SECONDS = 0.25
 HACKRF_IQ_SWEEP_BIN = os.path.join(os.path.dirname(__file__), "native", "bin", "hackrf_iq_sweep")
+HACKRF_STREAM_BIN = os.path.join(os.path.dirname(__file__), "native", "bin", "hackrf_stream")
 
 
 def _cmd_available(command: str) -> bool:
@@ -202,12 +204,45 @@ class HackRFBackend(SDRBackend):
         return devices
 
     def start_stream(self, request: StreamRequest):
-        if not _cmd_available("hackrf_transfer"):
-            raise RuntimeError("hackrf_transfer not found in PATH")
-
         # HackRF gain constraints: LNA in steps of 8 dB (0..40), VGA in steps of 2 dB (0..62).
         lna = _nearest_step(request.lna_gain_db, step=8, lo=0, hi=40)
         vga = _nearest_step(request.vga_gain_db, step=2, lo=0, hi=62)
+        num_samples = request.num_samples
+        if num_samples is None and request.duration_seconds:
+            num_samples = int(request.duration_seconds * request.sample_rate_sps)
+
+        if os.path.exists(HACKRF_STREAM_BIN):
+            cmd = [
+                HACKRF_STREAM_BIN,
+                "--center-freq-hz",
+                str(request.center_freq_hz),
+                "--sample-rate-sps",
+                str(request.sample_rate_sps),
+                "--amp-enable",
+                "1" if request.amp_enable else "0",
+                "--lna-gain-db",
+                str(lna),
+                "--vga-gain-db",
+                str(vga),
+            ]
+            if request.baseband_filter_hz:
+                cmd.extend(["--baseband-filter-hz", str(request.baseband_filter_hz)])
+            if request.duration_seconds:
+                cmd.extend(["--duration-seconds", str(request.duration_seconds)])
+            if num_samples:
+                cmd.extend(["--num-samples", str(num_samples)])
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+                text=False,
+            )
+            return ControlledStreamProcess(process)
+
+        if not _cmd_available("hackrf_transfer"):
+            raise RuntimeError("hackrf_transfer not found in PATH")
 
         cmd = [
             "hackrf_transfer",
@@ -227,14 +262,16 @@ class HackRFBackend(SDRBackend):
         if request.baseband_filter_hz:
             cmd.extend(["-b", str(request.baseband_filter_hz)])
         # Support finite captures: explicit num_samples wins, else derive from duration.
-        num_samples = request.num_samples
-        if num_samples is None and request.duration_seconds:
-            num_samples = int(request.duration_seconds * request.sample_rate_sps)
         if num_samples:
             cmd.extend(["-n", str(num_samples)])
 
         continuous = num_samples is None
         return self._start_hackrf_transfer(cmd, continuous=continuous)
+
+    def retune_stream(self, process, request: StreamRequest) -> bool:
+        # The native hackrf_stream worker supports this; hackrf_transfer fallback does not.
+        retune = getattr(process, "retune", None)
+        return bool(retune and retune(request))
 
     def stop_stream(self, process) -> None:
         if process.poll() is None:

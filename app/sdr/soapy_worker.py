@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
+import queue
 import sys
+import threading
 import time
 
 import numpy as np
@@ -185,7 +188,31 @@ def _apply_tx_gain(dev, driver: str, tx_gain_db: int) -> None:
         pass
 
 
-def _run_rx(dev, args: argparse.Namespace) -> int:
+def _start_control_reader() -> queue.Queue[dict]:
+    commands: queue.Queue[dict] = queue.Queue()
+
+    def _reader() -> None:
+        while True:
+            try:
+                line = sys.stdin.buffer.readline()
+            except Exception:
+                return
+            if not line:
+                return
+            try:
+                command = json.loads(line.decode("utf-8", errors="replace"))
+            except Exception as exc:
+                print(f"control decode failed: {exc}", file=sys.stderr, flush=True)
+                continue
+            if isinstance(command, dict):
+                commands.put(command)
+
+    thread = threading.Thread(target=_reader, name="soapy-control", daemon=True)
+    thread.start()
+    return commands
+
+
+def _apply_rx_config(dev, args: argparse.Namespace) -> None:
     dev.setFrequency(SOAPY_SDR_RX, 0, float(args.center_freq_hz))
     dev.setSampleRate(SOAPY_SDR_RX, 0, float(args.sample_rate_sps))
     if args.baseband_filter_hz and args.baseband_filter_hz > 0:
@@ -195,8 +222,63 @@ def _run_rx(dev, args: argparse.Namespace) -> int:
             pass
     _apply_driver_gain(dev, args.driver, args.lna_gain_db, args.vga_gain_db)
 
+
+def _setup_rx_stream(dev):
     stream = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16)
     dev.activateStream(stream)
+    return stream
+
+
+def _close_rx_stream(dev, stream) -> None:
+    try:
+        dev.deactivateStream(stream)
+    except Exception:
+        pass
+    try:
+        dev.closeStream(stream)
+    except Exception:
+        pass
+
+
+def _drain_retune_commands(commands: queue.Queue[dict], args: argparse.Namespace) -> tuple[bool, bool]:
+    changed_sample_rate = False
+    latest: dict | None = None
+    while True:
+        try:
+            command = commands.get_nowait()
+        except queue.Empty:
+            break
+        if command.get("op") == "retune":
+            latest = command
+    if not latest:
+        return False, False
+
+    old_sample_rate = int(args.sample_rate_sps)
+    args.center_freq_hz = int(latest.get("center_freq_hz", args.center_freq_hz))
+    args.sample_rate_sps = int(latest.get("sample_rate_sps", args.sample_rate_sps))
+    args.baseband_filter_hz = int(latest.get("baseband_filter_hz", args.baseband_filter_hz) or 0)
+    args.lna_gain_db = int(latest.get("lna_gain_db", args.lna_gain_db))
+    args.vga_gain_db = int(latest.get("vga_gain_db", args.vga_gain_db))
+    changed_sample_rate = int(args.sample_rate_sps) != old_sample_rate
+    print(
+        "retune center_freq_hz=%d sample_rate_sps=%d baseband_filter_hz=%d lna=%d vga=%d"
+        % (
+            int(args.center_freq_hz),
+            int(args.sample_rate_sps),
+            int(args.baseband_filter_hz),
+            int(args.lna_gain_db),
+            int(args.vga_gain_db),
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+    return True, changed_sample_rate
+
+
+def _run_rx(dev, args: argparse.Namespace) -> int:
+    commands = _start_control_reader()
+    _apply_rx_config(dev, args)
+    stream = _setup_rx_stream(dev)
 
     start_ts = time.time()
     max_samples = int(args.num_samples) if args.num_samples > 0 else 0
@@ -210,6 +292,14 @@ def _run_rx(dev, args: argparse.Namespace) -> int:
 
     try:
         while True:
+            retuned, rebuild_stream = _drain_retune_commands(commands, args)
+            if rebuild_stream:
+                _close_rx_stream(dev, stream)
+                _apply_rx_config(dev, args)
+                stream = _setup_rx_stream(dev)
+            elif retuned:
+                _apply_rx_config(dev, args)
+
             if duration_s and (time.time() - start_ts) >= duration_s:
                 break
             if max_samples and produced_samples >= max_samples:
@@ -232,14 +322,7 @@ def _run_rx(dev, args: argparse.Namespace) -> int:
             out.write(iq8.tobytes())
             produced_samples += n
     finally:
-        try:
-            dev.deactivateStream(stream)
-        except Exception:
-            pass
-        try:
-            dev.closeStream(stream)
-        except Exception:
-            pass
+        _close_rx_stream(dev, stream)
     return 0
 
 

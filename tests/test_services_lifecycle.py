@@ -59,6 +59,16 @@ class _FailingRestartBackend(_Backend):
         raise RuntimeError("hackrf_transfer exited during stream startup")
 
 
+class _RetuningBackend(_Backend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.retune_requests = []
+
+    def retune_stream(self, _process, request) -> bool:
+        self.retune_requests.append(request)
+        return True
+
+
 class _Registry:
     def __init__(self, backend: _Backend) -> None:
         self.backend = backend
@@ -111,6 +121,24 @@ def test_stream_repeated_start_stop_cycles():
         session = manager.start(_stream_config())
         manager.stop(session.id)
     assert backend.stream_stops == 5
+
+
+def test_continuous_stream_retune_keeps_existing_process_open():
+    backend = _RetuningBackend()
+    manager = StreamManager(_Registry(backend))
+    session = manager.start(_stream_config())
+    original_process = session.process
+
+    retuned = manager.retune(
+        session.id,
+        _stream_config().model_copy(update={"center_freq_hz": 101_100_000}),
+    )
+
+    assert retuned.process is original_process
+    assert retuned.config.center_freq_hz == 101_100_000
+    assert backend.stream_starts == 1
+    assert backend.stream_stops == 0
+    assert len(backend.retune_requests) == 1
 
 
 def test_stop_all_cleans_up_streams_and_tx():
