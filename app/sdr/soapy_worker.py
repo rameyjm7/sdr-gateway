@@ -50,6 +50,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _select_device_kwargs(driver: str, device_index: int) -> dict:
+    serial = os.getenv(f"{driver.upper()}_SERIAL", "").strip()
+    if driver.lower() == "sdrplay" and serial:
+        return {"driver": driver, "serial": serial}
     matches = SoapySDR.Device.enumerate({"driver": driver})
     if not matches:
         raise RuntimeError(f"No Soapy device found for driver={driver}")
@@ -107,7 +110,7 @@ def _apply_driver_gain(dev, driver: str, lna_gain_db: int, vga_gain_db: int) -> 
     total = float(lna_gain_db + vga_gain_db)
 
     # Most receive chains want manual gain mode in this app.
-    if driver in {"rtlsdr", "airspy", "bladerf"}:
+    if driver in {"rtlsdr", "airspy", "bladerf", "sdrplay"}:
         try:
             dev.setGainMode(SOAPY_SDR_RX, 0, False)
         except Exception:
@@ -150,6 +153,14 @@ def _apply_driver_gain(dev, driver: str, lna_gain_db: int, vga_gain_db: int) -> 
     elif driver == "sidekiq":
         # Sidekiq plugins may expose a narrow or fixed gain range.
         if _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", float(lna_gain_db)):
+            return
+    elif driver == "sdrplay":
+        # SDRplay exposes gain reduction controls: lower RFGR is more RF gain,
+        # while IFGR spans the larger IF gain-reduction range.
+        set_any = False
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "rfgr", float(lna_gain_db)) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "ifgr", float(vga_gain_db)) or set_any
+        if set_any:
             return
 
     # Fallback to aggregate receive gain when named controls are unavailable.

@@ -9,6 +9,7 @@ from app.sdr.bladerf_backend import BladeRFBackend
 from app.sdr.hackrf_backend import HackRFBackend
 from app.sdr.mock_backend import MockBackend
 from app.sdr.rtlsdr_backend import RTLSDRBackend
+from app.sdr.sdrplay_backend import SDRplayBackend
 from app.sdr.sidekiq_backend import SidekiqBackend
 
 
@@ -22,6 +23,7 @@ class BackendRegistry:
             AntSDRE200Backend(),
             BladeRFBackend(),
             RTLSDRBackend(),
+            SDRplayBackend(),
             SidekiqBackend(),
         ]
         if enable_mock:

@@ -242,6 +242,13 @@ def _default_probe_detail(row: ProbeResult) -> ProbeResult:
 
 
 def _inspect_soapy_probe_detail(row: ProbeResult) -> ProbeResult:
+    if (
+        row.driver.lower() == "sdrplay"
+        and not (row.serial or "").strip()
+        and "probe did not return details" in (row.notes or "").lower()
+    ):
+        return _default_probe_detail(row)
+
     SoapySDR, SOAPY_SDR_RX = _load_soapysdr()
     if SoapySDR is None or row.driver in {"hackrf", "antsdre200", "mock"}:
         return _default_probe_detail(row)
