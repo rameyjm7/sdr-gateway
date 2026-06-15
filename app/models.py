@@ -253,7 +253,7 @@ class WiFiMonitorConfig(BaseModel):
     channels: list[int] = Field(default_factory=list)
     bands: list[str] = Field(default_factory=lambda: ["2.4", "5"])
     set_channel: bool = True
-    set_monitor: bool = False
+    set_monitor: bool = True
     channel_hop_interval_s: float = Field(default=1.0, ge=0.1, le=60.0)
     active_scan: bool = False
     active_scan_interval_s: float = Field(default=60.0, ge=5.0, le=3600.0)
@@ -268,7 +268,7 @@ class WiFiMonitorConfig(BaseModel):
                     "interface": "wlan0",
                     "bands": ["2.4", "5"],
                     "set_channel": True,
-                    "set_monitor": False,
+                    "set_monitor": True,
                     "active_scan": False,
                     "command": "tcpdump",
                 }

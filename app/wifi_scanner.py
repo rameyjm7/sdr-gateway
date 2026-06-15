@@ -86,7 +86,7 @@ def _parse_args() -> argparse.Namespace:
         "--set-monitor",
         dest="set_monitor",
         action="store_true",
-        default=False,
+        default=True,
         help="Ask the gateway to switch the interface into monitor mode before scanning.",
     )
     parser.add_argument("--no-set-monitor", dest="set_monitor", action="store_false")

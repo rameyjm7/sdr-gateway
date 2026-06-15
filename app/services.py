@@ -137,7 +137,7 @@ class WiFiMonitorManager:
             raise ValueError(f"WiFi interface {config.interface} is already in use")
         channels = self._channels_for_config(config)
         if config.set_monitor:
-            self._set_interface_type(config.interface, "monitor")
+            self._prepare_monitor_interface(config.interface)
         initial_control_event: dict[str, Any] | None = None
         if channels and config.set_channel:
             try:
@@ -493,6 +493,17 @@ class WiFiMonitorManager:
         WiFiMonitorManager._run_checked(["ip", "link", "set", interface, "down"])
         WiFiMonitorManager._run_checked(["iw", "dev", interface, "set", "type", mode])
         WiFiMonitorManager._run_checked(["ip", "link", "set", interface, "up"])
+
+    @staticmethod
+    def _prepare_monitor_interface(interface: str) -> None:
+        commands = [
+            ["airmon-ng", "check", "kill"],
+            ["ip", "link", "set", interface, "down"],
+            ["iw", "dev", interface, "set", "type", "monitor"],
+            ["ip", "link", "set", interface, "up"],
+        ]
+        for command in commands:
+            WiFiMonitorManager._run_checked(command, timeout=20)
 
     @staticmethod
     def _set_channel(interface: str, channel: int) -> None:
@@ -987,8 +998,8 @@ class WiFiMonitorManager:
             raise ValueError(f"{command} is required for WiFi monitor scans")
 
     @staticmethod
-    def _run_checked(command: list[str]) -> None:
-        result = subprocess.run(command, text=True, capture_output=True, timeout=8, check=False)
+    def _run_checked(command: list[str], timeout: float = 8) -> None:
+        result = subprocess.run(command, text=True, capture_output=True, timeout=timeout, check=False)
         if result.returncode != 0:
             raise RuntimeError(f"{' '.join(command)} failed: {(result.stderr or result.stdout).strip()}")
 

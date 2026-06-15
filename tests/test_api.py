@@ -39,6 +39,9 @@ class _FakeStreamManager:
     def get(self, stream_id: str):
         return self._sessions[stream_id]
 
+    def stop_all(self):
+        self._sessions.clear()
+
 
 class _FakeTxManager:
     def __init__(self) -> None:
@@ -56,6 +59,9 @@ class _FakeTxManager:
 
     def list_states(self):
         return list(self._sessions.values())
+
+    def stop_all(self):
+        self._sessions.clear()
 
 
 class _FakeWiFiMonitorManager:
@@ -117,7 +123,7 @@ class _FakeWiFiMonitorManager:
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.setenv("SDR_GATEWAY_API_TOKEN", "test-token")
+    monkeypatch.setenv("SDR_GATEWAY_API_TOKEN", "test-token-123456")
     get_settings.cache_clear()
     main.settings = get_settings()
     monkeypatch.setattr(main, "stream_manager", _FakeStreamManager())
@@ -129,7 +135,7 @@ def client(monkeypatch):
 
 
 def _auth_headers() -> dict[str, str]:
-    return {"Authorization": "Bearer test-token"}
+    return {"Authorization": "Bearer test-token-123456"}
 
 
 def test_health_is_public(client: TestClient):
