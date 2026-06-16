@@ -95,11 +95,13 @@ class WiFiMonitorManager:
         self._sessions: dict[str, WiFiMonitorSession] = {}
 
     def list_interfaces(self) -> list[dict[str, Any]]:
-        interfaces = self._iw_interfaces()
+        interfaces = [item for item in self._iw_interfaces() if self._is_wifi_interface_name(str(item.get("name") or ""))]
         if interfaces:
             return sorted(interfaces, key=lambda item: str(item.get("name") or ""))
         by_name = {str(item.get("name")): item for item in interfaces if item.get("name")}
         for name in sorted(os.listdir("/sys/class/net")) if os.path.isdir("/sys/class/net") else []:
+            if not self._is_wifi_interface_name(name):
+                continue
             by_name.setdefault(
                 name,
                 {
@@ -977,6 +979,10 @@ class WiFiMonitorManager:
             return None
 
     @staticmethod
+    def _is_wifi_interface_name(name: str) -> bool:
+        return "wlan" in str(name or "").strip().lower()
+
+    @staticmethod
     def _interface_up(name: str) -> bool:
         state = WiFiMonitorManager._read_sys_text(f"/sys/class/net/{name}/operstate")
         return state in {"up", "unknown"}
@@ -987,6 +993,8 @@ class WiFiMonitorManager:
             raise ValueError("invalid interface name")
         if not os.path.exists(f"/sys/class/net/{interface}"):
             raise KeyError(f"Unknown WiFi interface '{interface}'")
+        if not self._is_wifi_interface_name(interface):
+            raise ValueError(f"Interface '{interface}' is not an RF Sentinel WiFi monitor interface")
         if config.command == "scapy":
             try:
                 import scapy.all  # noqa: F401

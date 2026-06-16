@@ -485,13 +485,16 @@ async def iq_stream(stream_id: str, websocket: WebSocket):
         start_mode = "latest"
     cursor_id = stream_manager.create_cursor(stream_id, start=start_mode)
     await websocket.accept()
+    empty_chunk_reported_at = 0.0
     try:
         while True:
             chunk = await stream_manager.read_chunk(stream_id, cursor_id=cursor_id)
             if not chunk:
+                should_close = True
                 try:
                     session = stream_manager.get(stream_id)
                     rc = session.process.poll()
+                    should_close = rc is not None or session.status not in {"running", "retuning"}
                     stderr_text = ""
                     stderr = getattr(session.process, "stderr", None)
                     if rc is not None and stderr is not None:
@@ -500,21 +503,29 @@ async def iq_stream(stream_id: str, websocket: WebSocket):
                             stderr_text = raw.decode("utf-8", errors="replace")[-1000:]
                         else:
                             stderr_text = str(raw)[-1000:]
-                    logger.warning(
-                        "stream_iq_empty_chunk stream_id=%s returncode=%s stderr_tail=%s",
-                        stream_id,
-                        rc,
-                        stderr_text.strip(),
-                        extra={
-                            "request_id": "-",
-                            "method": "WS",
-                            "path": f"/ws/iq/{stream_id}",
-                            "status_code": 0,
-                        },
-                    )
+                    now = time.monotonic()
+                    if should_close or (now - empty_chunk_reported_at) >= 10.0:
+                        logger.warning(
+                            "stream_iq_empty_chunk stream_id=%s returncode=%s status=%s closing=%s stderr_tail=%s",
+                            stream_id,
+                            rc,
+                            session.status,
+                            int(should_close),
+                            stderr_text.strip(),
+                            extra={
+                                "request_id": "-",
+                                "method": "WS",
+                                "path": f"/ws/iq/{stream_id}",
+                                "status_code": 0,
+                            },
+                        )
+                        empty_chunk_reported_at = now
                 except Exception:
-                    pass
-                break
+                    should_close = True
+                if should_close:
+                    break
+                await asyncio.sleep(0.1)
+                continue
             try:
                 await websocket.send_bytes(chunk)
             except (WebSocketDisconnect, RuntimeError, AssertionError) as exc:

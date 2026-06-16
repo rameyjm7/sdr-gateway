@@ -76,7 +76,7 @@ Group=${RUN_GROUP}
 WorkingDirectory=${REPO_ROOT}
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-${ENV_FILE}
-ExecStart=${UVICORN_BIN} app.main:app --host ${HOST} --port ${PORT}
+ExecStart=${UVICORN_BIN} app.main:app --host ${HOST} --port ${PORT} --ws-ping-interval 0
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=10
