@@ -11,7 +11,10 @@ from app.sdr.soapy_utils import find_driver_devices
 from app.sdr.usb_utils import lsusb_devices
 
 
-SDRPLAY_FREQ_MIN = 1_000_000
+# RSP2 can be useful down into LF/VLF with the right input path.  Keep the
+# gateway permissive here so low-frequency protocol jobs can own the SDRplay
+# through the same scheduler/stream API as the 2.4 GHz stacks.
+SDRPLAY_FREQ_MIN = 1_000
 SDRPLAY_FREQ_MAX = 2_000_000_000
 SDRPLAY_MAX_SAMPLE_RATE = 10_000_000
 SDRPLAY_USB_VIDPID_PREFIX = "1df7:"
