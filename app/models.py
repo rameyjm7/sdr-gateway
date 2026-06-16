@@ -32,6 +32,7 @@ class StreamConfig(BaseModel):
     lna_gain_db: int = Field(default=16, ge=0, le=40)
     vga_gain_db: int = Field(default=20, ge=0, le=62)
     amp_enable: bool = False
+    replace_existing: bool = False
     baseband_filter_hz: int | None = Field(default=None, ge=1_000, le=61_440_000)
     # Optional finite capture controls. If set, backend may stop after N samples.
     duration_seconds: int | None = Field(default=None, ge=1, le=3600)

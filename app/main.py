@@ -176,6 +176,27 @@ def _ensure_device_available(device_id: str) -> None:
     raise HTTPException(status_code=409, detail=f"Device {device_id} is already in use by {owner} {owner_id}".strip())
 
 
+def _release_rx_owners_for_device(device_id: str) -> None:
+    for session in list(iq_sweep_manager.list_states()):
+        if session.config.device_id == device_id:
+            try:
+                iq_sweep_manager.stop(session.id)
+            except Exception:
+                logger.warning("release_device_iq_sweep_failed device_id=%s iq_sweep_id=%s", device_id, session.id, exc_info=True)
+    for session in list(sweep_manager.list_states()):
+        if session.config.device_id == device_id:
+            try:
+                sweep_manager.stop(session.id)
+            except Exception:
+                logger.warning("release_device_sweep_failed device_id=%s sweep_id=%s", device_id, session.id, exc_info=True)
+    for session in list(stream_manager.list_states()):
+        if session.config.device_id == device_id:
+            try:
+                stream_manager.stop(session.id)
+            except Exception:
+                logger.warning("release_device_stream_failed device_id=%s stream_id=%s", device_id, session.id, exc_info=True)
+
+
 def _device_by_id(device_id: str):
     return next((device for device in registry.list_devices() if device.id == device_id), None)
 
@@ -402,6 +423,8 @@ def start_stream(config: StreamConfig, _: None = Depends(require_http_auth)):
         },
     )
     try:
+        if config.replace_existing:
+            _release_rx_owners_for_device(config.device_id)
         _ensure_device_available(config.device_id)
         session = stream_manager.start(config)
     except KeyError as exc:

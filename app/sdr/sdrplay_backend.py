@@ -128,11 +128,56 @@ class SDRplayBackend(SDRBackend):
                 process.kill()
 
     def start_sweep(self, request: SweepRequest):
-        raise RuntimeError("SDRplay sweep backend is not implemented in sdr-gateway yet.")
+        worker = Path(__file__).with_name("soapy_sweep_worker.py")
+        if not worker.exists():
+            raise RuntimeError(f"soapy sweep worker not found: {worker}")
+        try:
+            device_index = int(request.device_id.split(":", 1)[1])
+        except Exception as exc:
+            raise RuntimeError(f"invalid sdrplay device id: {request.device_id}") from exc
+
+        sample_rate_sps = SDRPLAY_MAX_SAMPLE_RATE
+        cmd = [
+            sys.executable,
+            str(worker),
+            "--driver",
+            "sdrplay",
+            "--device-index",
+            str(device_index),
+            "--start-freq-hz",
+            str(request.start_freq_hz),
+            "--stop-freq-hz",
+            str(request.stop_freq_hz),
+            "--bin-width-hz",
+            str(request.bin_width_hz),
+            "--sample-rate-sps",
+            str(sample_rate_sps),
+            "--baseband-filter-hz",
+            str(sample_rate_sps),
+            "--lna-gain-db",
+            str(request.lna_gain_db),
+            "--vga-gain-db",
+            str(request.vga_gain_db),
+        ]
+        return subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
 
     def stop_sweep(self, process) -> None:
         if process is None:
             return
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
     def start_tx_burst(self, request: TxBurstRequest):
         raise RuntimeError("TX is not supported for SDRplay devices.")
