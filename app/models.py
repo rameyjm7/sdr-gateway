@@ -301,6 +301,48 @@ class WiFiMonitorEvent(BaseModel):
     channel: int | None = None
 
 
+class BluetoothControllerInfo(BaseModel):
+    id: str
+    address: str | None = None
+    name: str | None = None
+    up: bool = False
+
+
+class BluetoothNameRequest(BaseModel):
+    address: str = Field(pattern=r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
+    controller: str = Field(default="hci0", min_length=1, max_length=32)
+    timeout_seconds: float = Field(default=6.0, ge=1.0, le=30.0)
+
+
+class BluetoothNameResponse(BaseModel):
+    controller: str
+    address: str
+    name: str = ""
+    ok: bool = False
+    returncode: int | None = None
+    stderr: str = ""
+
+
+class BluetoothL2PingRequest(BaseModel):
+    address: str = Field(pattern=r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
+    controller: str = Field(default="hci0", min_length=1, max_length=32)
+    count: int = Field(default=3, ge=1, le=20)
+    size: int = Field(default=44, ge=0, le=1024)
+    timeout_seconds: float = Field(default=12.0, ge=1.0, le=60.0)
+
+
+class BluetoothL2PingResponse(BaseModel):
+    controller: str
+    address: str
+    ok: bool = False
+    returncode: int | None = None
+    sent: int = 0
+    received: int = 0
+    loss_pct: float | None = None
+    stdout: str = ""
+    stderr: str = ""
+
+
 class TxBurstConfig(BaseModel):
     device_id: str = Field(description="Device identifier from /devices")
     center_freq_hz: int = Field(ge=1_000_000, le=6_000_000_000)

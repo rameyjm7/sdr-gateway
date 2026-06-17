@@ -4,6 +4,8 @@ import asyncio
 from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
+import re
+import subprocess
 import time
 import uuid
 from typing import Any
@@ -20,6 +22,11 @@ from app.models import (
     ApexMissionRequest,
     ApexResource,
     ApexResourceUpsert,
+    BluetoothControllerInfo,
+    BluetoothL2PingRequest,
+    BluetoothL2PingResponse,
+    BluetoothNameRequest,
+    BluetoothNameResponse,
     DeviceInfo,
     ErrorResponse,
     IQSweepChunk,
@@ -130,6 +137,61 @@ def _raise_bad_request(exc: Exception) -> None:
 
 def _raise_not_found(message: str, exc: Exception | None = None) -> None:
     raise HTTPException(status_code=404, detail=message) from exc
+
+
+def _clean_bt_address(address: str) -> str:
+    value = str(address or "").strip().upper()
+    if not re.fullmatch(r"[0-9A-F]{2}(:[0-9A-F]{2}){5}", value):
+        raise ValueError(f"Invalid Bluetooth address '{address}'")
+    return value
+
+
+def _clean_hci_controller(controller: str) -> str:
+    value = str(controller or "hci0").strip()
+    if not re.fullmatch(r"hci[0-9]+", value):
+        raise ValueError(f"Invalid Bluetooth controller '{controller}'")
+    return value
+
+
+def _run_bt_command(command: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(command, text=True, capture_output=True, timeout=max(1.0, float(timeout)), check=False)
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"{command[0]} is not installed") from exc
+
+
+def _bluetooth_controllers() -> list[dict[str, Any]]:
+    result = _run_bt_command(["hciconfig", "-a"], timeout=5)
+    controllers: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for line in result.stdout.splitlines():
+        header = re.match(r"^(hci[0-9]+):\s+Type:.*BD Address:\s+([0-9A-Fa-f:]{17})", line)
+        if header:
+            if current:
+                controllers.append(current)
+            current = {"id": header.group(1), "address": header.group(2).upper(), "name": None, "up": False}
+            continue
+        if current is None:
+            continue
+        if "UP RUNNING" in line:
+            current["up"] = True
+        name_match = re.search(r"Name:\s+'([^']*)'", line)
+        if name_match:
+            current["name"] = name_match.group(1)
+    if current:
+        controllers.append(current)
+    return controllers
+
+
+def _parse_l2ping_counts(stdout: str) -> tuple[int, int, float | None]:
+    sent = received = 0
+    loss_pct: float | None = None
+    match = re.search(r"(?P<sent>\d+)\s+sent,\s+(?P<received>\d+)\s+received,\s+(?P<loss>[0-9.]+)%\s+loss", stdout)
+    if match:
+        sent = int(match.group("sent"))
+        received = int(match.group("received"))
+        loss_pct = float(match.group("loss"))
+    return sent, received, loss_pct
 
 
 def _device_occupancy() -> dict[str, dict[str, str | bool]]:
@@ -326,6 +388,61 @@ def list_devices(_: None = Depends(require_http_auth)):
 @app.get("/wifi/interfaces", response_model=list[WiFiInterfaceInfo], responses=ERROR_RESPONSES)
 def list_wifi_interfaces(_: None = Depends(require_http_auth)):
     return [WiFiInterfaceInfo(**item) for item in wifi_monitor_manager.list_interfaces()]
+
+
+@app.get("/bluetooth/controllers", response_model=list[BluetoothControllerInfo], responses=ERROR_RESPONSES)
+def list_bluetooth_controllers(_: None = Depends(require_http_auth)):
+    try:
+        return [BluetoothControllerInfo(**item) for item in _bluetooth_controllers()]
+    except Exception as exc:
+        _raise_bad_request(exc)
+
+
+@app.post("/bluetooth/name", response_model=BluetoothNameResponse, responses=ERROR_RESPONSES)
+def bluetooth_remote_name(config: BluetoothNameRequest, _: None = Depends(require_http_auth)):
+    try:
+        controller = _clean_hci_controller(config.controller)
+        address = _clean_bt_address(config.address)
+        result = _run_bt_command(["hcitool", "-i", controller, "name", address], timeout=config.timeout_seconds)
+    except Exception as exc:
+        _raise_bad_request(exc)
+    name = result.stdout.strip()
+    stderr = result.stderr.strip()
+    return BluetoothNameResponse(
+        controller=controller,
+        address=address,
+        name=name,
+        ok=bool(name) and result.returncode == 0,
+        returncode=result.returncode,
+        stderr=stderr[-500:],
+    )
+
+
+@app.post("/bluetooth/l2ping", response_model=BluetoothL2PingResponse, responses=ERROR_RESPONSES)
+def bluetooth_l2ping(config: BluetoothL2PingRequest, _: None = Depends(require_http_auth)):
+    try:
+        controller = _clean_hci_controller(config.controller)
+        address = _clean_bt_address(config.address)
+        result = _run_bt_command(
+            ["l2ping", "-i", controller, "-c", str(config.count), "-s", str(config.size), address],
+            timeout=config.timeout_seconds,
+        )
+    except Exception as exc:
+        _raise_bad_request(exc)
+    stdout = result.stdout.strip()
+    stderr = result.stderr.strip()
+    sent, received, loss_pct = _parse_l2ping_counts(stdout)
+    return BluetoothL2PingResponse(
+        controller=controller,
+        address=address,
+        ok=result.returncode == 0 and received > 0,
+        returncode=result.returncode,
+        sent=sent,
+        received=received,
+        loss_pct=loss_pct,
+        stdout=stdout[-2000:],
+        stderr=stderr[-1000:],
+    )
 
 
 @app.post("/wifi/scans/start", response_model=WiFiMonitorState, responses=ERROR_RESPONSES)
