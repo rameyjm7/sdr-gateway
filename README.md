@@ -119,6 +119,7 @@ Request observability:
 - `POST /streams/start`
 - `POST /streams/{stream_id}/stop`
 - `GET /streams`
+- `POST /streams/probe`
 - `WS /ws/iq/{stream_id}`
 - `POST /tx/start`
 - `POST /tx/{tx_id}/stop`
@@ -139,6 +140,34 @@ curl -s http://localhost:8080/streams/start \
     "lna_gain_db":16,
     "vga_gain_db":20,
     "amp_enable":false
+  }'
+```
+
+## Stream probe
+
+`POST /streams/probe` starts a short-lived stream, reads two FFT captures, prints power metrics for each capture, and returns a comparison so you can confirm the stream is changing.
+
+CLI example:
+
+```bash
+sdr-gateway --probe --driver antsdre200 --test
+```
+
+Example:
+
+```bash
+curl -s http://localhost:8080/streams/probe \
+  -H "Authorization: Bearer $SDR_GATEWAY_API_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{
+    "device_id":"hackrf:0",
+    "center_freq_hz":1090000000,
+    "sample_rate_sps":2000000,
+    "lna_gain_db":16,
+    "vga_gain_db":20,
+    "amp_enable":false,
+    "capture_count":2,
+    "chunk_size":16384
   }'
 ```
 

@@ -24,7 +24,7 @@ class RTLSDRBackend(SDRBackend):
             tuner = item.get("tuner", "")
             suffix = f" :: {serial}" if serial else ""
             label = f"{manufacturer} - {product}{suffix}"
-            notes = "SoapySDR driver=rtlsdr (CS16 native, gateway serves int8 IQ)."
+            notes = "SoapySDR driver=rtlsdr (CS16 native IQ by default)."
             if tuner:
                 notes = f"{notes} Tuner: {tuner}."
             devices.append(
@@ -65,6 +65,8 @@ class RTLSDRBackend(SDRBackend):
             str(request.lna_gain_db),
             "--vga-gain-db",
             str(request.vga_gain_db),
+            "--iq-format",
+            request.iq_format,
         ]
         if request.baseband_filter_hz:
             cmd.extend(["--baseband-filter-hz", str(request.baseband_filter_hz)])

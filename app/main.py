@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
@@ -17,6 +18,8 @@ from app.models import (
     DeviceInfo,
     ErrorResponse,
     OkResponse,
+    StreamProbeConfig,
+    StreamProbeState,
     StreamConfig,
     StreamState,
     SweepConfig,
@@ -209,6 +212,25 @@ def list_streams(_: None = Depends(require_http_auth)):
     return [StreamState(stream_id=s.id, status=s.status, config=s.config) for s in stream_manager.list_states()]
 
 
+@app.post(
+    "/streams/probe",
+    response_model=StreamProbeState,
+    responses=ERROR_RESPONSES,
+)
+async def probe_stream(config: StreamProbeConfig, _: None = Depends(require_http_auth)):
+    try:
+        result = await stream_manager.probe(
+            config,
+            capture_count=config.capture_count,
+            chunk_size=config.chunk_size,
+        )
+    except KeyError as exc:
+        _raise_not_found(str(exc), exc)
+    except Exception as exc:
+        _raise_bad_request(exc)
+    return StreamProbeState(**result)
+
+
 @app.websocket("/ws/iq/{stream_id}")
 async def iq_stream(stream_id: str, websocket: WebSocket):
     if not await require_ws_auth(websocket):
@@ -218,21 +240,24 @@ async def iq_stream(stream_id: str, websocket: WebSocket):
     except KeyError as exc:
         _raise_not_found(f"Unknown stream_id {stream_id}", exc)
 
+    keep_stream = str(websocket.query_params.get("keep", "")).strip().lower() in {"1", "true", "yes", "on"}
     await websocket.accept()
     try:
-        while True:
-            chunk = await stream_manager.read_chunk(stream_id)
-            if not chunk:
-                break
-            await websocket.send_bytes(chunk)
+        with stream_manager.subscribe(stream_id) as chunks:
+            while True:
+                chunk = await asyncio.to_thread(chunks.get)
+                if not chunk:
+                    break
+                await websocket.send_bytes(chunk)
     except WebSocketDisconnect:
         pass
     finally:
         # Ensure dropped/refreshing clients don't leave orphan SDR processes running.
-        try:
-            stream_manager.stop(stream_id)
-        except KeyError:
-            pass
+        if not keep_stream:
+            try:
+                stream_manager.stop(stream_id)
+            except KeyError:
+                pass
 
 
 @app.post(

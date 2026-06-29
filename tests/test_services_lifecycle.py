@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 
 import pytest
@@ -115,3 +116,26 @@ def test_stop_all_cleans_up_streams_and_tx():
     assert tx_manager.list_states() == []
     assert backend.stream_stops == 2
     assert backend.tx_stops == 1
+
+
+def test_stream_probe_reads_two_distinct_captures(monkeypatch):
+    backend = _Backend()
+    manager = StreamManager(_Registry(backend))
+    chunks = [
+        bytes([i % 256 for i in range(64)]),
+        bytes([(i * 3) % 256 for i in range(64)]),
+    ]
+
+    async def _fake_read_chunk(_stream_id: str, nbytes: int = 16384):
+        assert nbytes == 64
+        return chunks.pop(0)
+
+    monkeypatch.setattr(manager, "read_chunk", _fake_read_chunk)
+
+    result = asyncio.run(manager.probe(_stream_config(), capture_count=2, chunk_size=64))
+
+    assert result["alive"] is True
+    assert result["comparison"]["same_bytes"] is False
+    assert result["comparison"]["mean_abs_fft_delta_db"] >= 0
+    assert len(result["captures"]) == 2
+    assert backend.stream_stops == 1

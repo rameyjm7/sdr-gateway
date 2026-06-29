@@ -39,6 +39,40 @@ class _FakeStreamManager:
     def get(self, stream_id: str):
         return self._sessions[stream_id]
 
+    async def probe(self, config: StreamConfig, capture_count: int = 2, chunk_size: int = 16384):
+        return {
+            "stream_id": "stream-1",
+            "status": "alive",
+            "alive": True,
+            "device_id": config.device_id,
+            "capture_count": capture_count,
+            "captures": [
+                {
+                    "capture_index": 1,
+                    "bytes_read": chunk_size,
+                    "sample_pairs": chunk_size // 2,
+                    "mean_power_db": -12.5,
+                    "peak_power_db": 3.0,
+                    "peak_bin": 4,
+                },
+                {
+                    "capture_index": 2,
+                    "bytes_read": chunk_size,
+                    "sample_pairs": chunk_size // 2,
+                    "mean_power_db": -12.0,
+                    "peak_power_db": 3.5,
+                    "peak_bin": 5,
+                },
+            ],
+            "comparison": {
+                "same_bytes": False,
+                "mean_abs_fft_delta_db": 0.5,
+                "mean_power_delta_db": 0.5,
+                "peak_power_delta_db": 0.5,
+                "peak_bin_delta": 1,
+            },
+        }
+
 
 class _FakeTxManager:
     def __init__(self) -> None:
@@ -108,6 +142,25 @@ def test_stream_start_and_stop(client: TestClient):
     stopped = client.post("/streams/stream-1/stop", headers=_auth_headers())
     assert stopped.status_code == 200
     assert stopped.json() == {"ok": True}
+
+
+def test_stream_probe_reports_metric(client: TestClient):
+    payload = {
+        "device_id": "hackrf:0",
+        "center_freq_hz": 100_000_000,
+        "sample_rate_sps": 2_000_000,
+        "lna_gain_db": 16,
+        "vga_gain_db": 20,
+        "amp_enable": False,
+        "capture_count": 2,
+        "chunk_size": 1024,
+    }
+    probed = client.post("/streams/probe", headers=_auth_headers(), json=payload)
+    assert probed.status_code == 200
+    body = probed.json()
+    assert body["alive"] is True
+    assert body["comparison"]["same_bytes"] is False
+    assert len(body["captures"]) == 2
 
 
 def test_tx_start_and_stop(client: TestClient):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -30,6 +32,10 @@ class StreamConfig(BaseModel):
     vga_gain_db: int = Field(default=20, ge=0, le=62)
     amp_enable: bool = False
     baseband_filter_hz: int | None = Field(default=None, ge=200_000, le=61_440_000)
+    iq_format: Literal["native", "cs16", "i8"] = Field(
+        default="native",
+        description="Websocket IQ sample format. native resolves per backend; cs16 is interleaved int16 IQ; i8 is interleaved int8 IQ.",
+    )
     # Optional finite capture controls. If set, backend may stop after N samples.
     duration_seconds: int | None = Field(default=None, ge=1, le=3600)
     num_samples: int | None = Field(default=None, ge=1)
@@ -44,6 +50,7 @@ class StreamConfig(BaseModel):
                     "vga_gain_db": 20,
                     "amp_enable": False,
                     "baseband_filter_hz": 2000000,
+                    "iq_format": "native",
                     "duration_seconds": 5,
                 }
             ]
@@ -55,6 +62,38 @@ class StreamState(BaseModel):
     stream_id: str
     status: str
     config: StreamConfig
+
+
+class StreamProbeConfig(StreamConfig):
+    capture_count: int = Field(default=2, ge=2, le=10)
+    chunk_size: int = Field(default=16384, ge=1024, le=262144)
+
+
+class StreamProbeCapture(BaseModel):
+    capture_index: int
+    bytes_read: int
+    sample_pairs: int
+    mean_power_db: float
+    peak_power_db: float
+    peak_bin: int
+
+
+class StreamProbeComparison(BaseModel):
+    same_bytes: bool
+    mean_abs_fft_delta_db: float
+    mean_power_delta_db: float
+    peak_power_delta_db: float
+    peak_bin_delta: int
+
+
+class StreamProbeState(BaseModel):
+    stream_id: str
+    status: str
+    alive: bool
+    device_id: str
+    capture_count: int
+    captures: list[StreamProbeCapture]
+    comparison: StreamProbeComparison
 
 
 class SweepConfig(BaseModel):

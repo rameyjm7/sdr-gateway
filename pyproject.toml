@@ -23,6 +23,9 @@ dev = [
   "numpy>=1.26.0"
 ]
 
+[project.scripts]
+sdr-gateway = "app.cli:main"
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
