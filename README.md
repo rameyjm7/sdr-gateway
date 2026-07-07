@@ -306,6 +306,25 @@ This gateway is compatible with [SDR-Shark](https://github.com/rameyjm7/SDR-Shar
 - `TROUBLESHOOTING.md`
 - `RELEASE_CHECKLIST.md`
 
+## Licensing
+
+sdr-gateway is source-available for personal, educational, research, evaluation,
+and other non-commercial use. All commercial rights are retained by Jacob Ramey
+and RTG LLC. Commercial use, paid deployment, commercial hosting, integration
+into commercial products or services, contract deliverables, managed service
+offerings, or other revenue-generating use requires prior written permission.
+
+This project interoperates with third-party SDR drivers, vendor SDKs, hardware
+firmware, protocol specifications, tools, and optional datasets or captures.
+Jacob Ramey and RTG LLC make no ownership claim over those third-party
+materials; they remain subject to their original licenses, terms, and
+redistribution restrictions.
+
+For commercial licensing, integration, support, or permission inquiries, contact:
+
+- Jacob Ramey: rameyjm7@gmail.com
+- RTG LLC: jake.rtgllc@gmail.com
+
 ## Notes
 
 - IQ format over websocket is raw interleaved signed 8-bit bytes: `I,Q,I,Q,...`
