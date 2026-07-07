@@ -379,8 +379,8 @@ def verify_auth(_: None = Depends(require_http_auth)):
 
 
 @app.get("/devices", response_model=list[DeviceInfo])
-def list_devices(_: None = Depends(require_http_auth)):
-    devices = registry.list_devices()
+def list_devices(refresh: bool = False, _: None = Depends(require_http_auth)):
+    devices = registry.list_devices(refresh=refresh)
     occupancy = _device_occupancy()
     return [DeviceInfo(**d.__dict__, **occupancy.get(d.id, {})) for d in devices]
 

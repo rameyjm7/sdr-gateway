@@ -50,6 +50,7 @@ class ControlledStreamProcess:
             "lna_gain_db": int(request.lna_gain_db),
             "vga_gain_db": int(request.vga_gain_db),
             "amp_enable": bool(request.amp_enable),
+            "rx_channels": list(request.rx_channels or [0]),
         }
         payload = (json.dumps(command, separators=(",", ":")) + "\n").encode("ascii")
         with self._control_lock:

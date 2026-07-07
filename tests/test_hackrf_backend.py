@@ -32,6 +32,7 @@ def _stream_request(**updates) -> StreamRequest:
         "vga_gain_db": 32,
         "amp_enable": False,
         "baseband_filter_hz": 6_000_000,
+        "rx_channels": [0],
         "duration_seconds": None,
         "num_samples": None,
     }

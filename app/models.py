@@ -34,6 +34,7 @@ class StreamConfig(BaseModel):
     amp_enable: bool = False
     replace_existing: bool = False
     baseband_filter_hz: int | None = Field(default=None, ge=1_000, le=61_440_000)
+    rx_channels: list[int] = Field(default_factory=lambda: [0], min_length=1, max_length=2)
     # Optional finite capture controls. If set, backend may stop after N samples.
     duration_seconds: int | None = Field(default=None, ge=1, le=3600)
     num_samples: int | None = Field(default=None, ge=1)
@@ -48,6 +49,7 @@ class StreamConfig(BaseModel):
                     "vga_gain_db": 20,
                     "amp_enable": False,
                     "baseband_filter_hz": 2000000,
+                    "rx_channels": [0],
                     "duration_seconds": 5,
                 }
             ]
@@ -101,6 +103,7 @@ class StreamRetuneConfig(BaseModel):
     vga_gain_db: int = Field(default=20, ge=0, le=62)
     amp_enable: bool = False
     baseband_filter_hz: int | None = Field(default=None, ge=1_000, le=61_440_000)
+    rx_channels: list[int] = Field(default_factory=lambda: [0], min_length=1, max_length=2)
 
 
 class SweepConfig(BaseModel):

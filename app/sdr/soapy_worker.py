@@ -40,6 +40,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--baseband-filter-hz", type=int, default=0)
     p.add_argument("--lna-gain-db", type=int, default=0)
     p.add_argument("--vga-gain-db", type=int, default=0)
+    p.add_argument("--rx-channels", type=str, default="0")
     p.add_argument("--duration-seconds", type=int, default=0)
     p.add_argument("--num-samples", type=int, default=0)
     p.add_argument("--tx-gain-db", type=int, default=20)
@@ -47,6 +48,24 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--repeat", type=int, default=1)
     p.add_argument("--timeout-seconds", type=int, default=30)
     return p.parse_args()
+
+
+def _parse_rx_channels(raw) -> list[int]:
+    channels: list[int] = []
+    if isinstance(raw, (list, tuple)):
+        iterable = raw
+    else:
+        iterable = str(raw or "0").split(",")
+    for part in iterable:
+        part = str(part).strip()
+        if not part:
+            continue
+        channel = int(part)
+        if channel < 0:
+            raise ValueError("rx channel indexes must be non-negative")
+        if channel not in channels:
+            channels.append(channel)
+    return channels or [0]
 
 
 def _select_device_kwargs(driver: str, device_index: int) -> dict:
@@ -77,12 +96,12 @@ def _range_bounds(rng, default_min: float, default_max: float) -> tuple[float, f
     return float(default_min), float(default_max)
 
 
-def _clip_gain(dev, direction: int, name: str | None, value: float) -> float:
+def _clip_gain(dev, direction: int, name: str | None, value: float, channel: int = 0) -> float:
     try:
         if name:
-            lo, hi = _range_bounds(dev.getGainRange(direction, 0, name), 0.0, 76.0)
+            lo, hi = _range_bounds(dev.getGainRange(direction, channel, name), 0.0, 76.0)
         else:
-            lo, hi = _range_bounds(dev.getGainRange(direction, 0), 0.0, 76.0)
+            lo, hi = _range_bounds(dev.getGainRange(direction, channel), 0.0, 76.0)
     except Exception:
         lo, hi = 0.0, 76.0
     return float(min(max(value, lo), hi))
@@ -94,39 +113,40 @@ def _set_named_gain(
     element_names: dict[str, str],
     preferred: str,
     value: float,
+    channel: int = 0,
 ) -> bool:
     actual = element_names.get(preferred.lower())
     if not actual:
         return False
     try:
-        dev.setGain(direction, 0, actual, _clip_gain(dev, direction, actual, value))
+        dev.setGain(direction, channel, actual, _clip_gain(dev, direction, actual, value, channel))
         return True
     except Exception:
         return False
 
 
-def _apply_driver_gain(dev, driver: str, lna_gain_db: int, vga_gain_db: int) -> None:
+def _apply_driver_gain(dev, driver: str, lna_gain_db: int, vga_gain_db: int, channel: int = 0) -> None:
     driver = (driver or "").lower()
     total = float(lna_gain_db + vga_gain_db)
 
     # Most receive chains want manual gain mode in this app.
     if driver in {"rtlsdr", "airspy", "bladerf", "sdrplay"}:
         try:
-            dev.setGainMode(SOAPY_SDR_RX, 0, False)
+            dev.setGainMode(SOAPY_SDR_RX, channel, False)
         except Exception:
             pass
 
     try:
-        names = list(dev.listGains(SOAPY_SDR_RX, 0))
+        names = list(dev.listGains(SOAPY_SDR_RX, channel))
     except Exception:
         names = []
     element_names = {n.lower(): n for n in names}
 
     if driver == "rtlsdr":
         # SoapyRTLSDR usually exposes only one effective receive gain element.
-        if _set_named_gain(dev, SOAPY_SDR_RX, element_names, "tuner", total):
+        if _set_named_gain(dev, SOAPY_SDR_RX, element_names, "tuner", total, channel):
             return
-        if _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", total):
+        if _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", total, channel):
             return
     elif driver == "airspy":
         # Airspy commonly exposes LNA/MIX/VGA controls.
@@ -135,37 +155,37 @@ def _apply_driver_gain(dev, driver: str, lna_gain_db: int, vga_gain_db: int) -> 
         post_lna = max(0.0, float(vga_gain_db))
         mix = min(post_lna, 15.0)
         vga = max(0.0, post_lna - mix)
-        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", lna) or set_any
-        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "mix", mix) or set_any
-        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "vga", vga) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", lna, channel) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "mix", mix, channel) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "vga", vga, channel) or set_any
         if set_any:
             return
     elif driver == "bladerf":
         # bladeRF can expose total gain and/or staged gains.
         set_any = False
-        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", float(lna_gain_db)) or set_any
-        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "vga1", float(vga_gain_db) * 0.5) or set_any
-        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "vga2", float(vga_gain_db) * 0.5) or set_any
-        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "rxvga1", float(vga_gain_db) * 0.5) or set_any
-        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "rxvga2", float(vga_gain_db) * 0.5) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", float(lna_gain_db), channel) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "vga1", float(vga_gain_db) * 0.5, channel) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "vga2", float(vga_gain_db) * 0.5, channel) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "rxvga1", float(vga_gain_db) * 0.5, channel) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "rxvga2", float(vga_gain_db) * 0.5, channel) or set_any
         if set_any:
             return
     elif driver == "sidekiq":
         # Sidekiq plugins may expose a narrow or fixed gain range.
-        if _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", float(lna_gain_db)):
+        if _set_named_gain(dev, SOAPY_SDR_RX, element_names, "lna", float(lna_gain_db), channel):
             return
     elif driver == "sdrplay":
         # SDRplay exposes gain reduction controls: lower RFGR is more RF gain,
         # while IFGR spans the larger IF gain-reduction range.
         set_any = False
-        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "rfgr", float(lna_gain_db)) or set_any
-        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "ifgr", float(vga_gain_db)) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "rfgr", float(lna_gain_db), channel) or set_any
+        set_any = _set_named_gain(dev, SOAPY_SDR_RX, element_names, "ifgr", float(vga_gain_db), channel) or set_any
         if set_any:
             return
 
     # Fallback to aggregate receive gain when named controls are unavailable.
     try:
-        dev.setGain(SOAPY_SDR_RX, 0, _clip_gain(dev, SOAPY_SDR_RX, None, total))
+        dev.setGain(SOAPY_SDR_RX, channel, _clip_gain(dev, SOAPY_SDR_RX, None, total, channel))
     except Exception:
         pass
 
@@ -224,18 +244,19 @@ def _start_control_reader() -> queue.Queue[dict]:
 
 
 def _apply_rx_config(dev, args: argparse.Namespace) -> None:
-    dev.setFrequency(SOAPY_SDR_RX, 0, float(args.center_freq_hz))
-    dev.setSampleRate(SOAPY_SDR_RX, 0, float(args.sample_rate_sps))
-    if args.baseband_filter_hz and args.baseband_filter_hz > 0:
-        try:
-            dev.setBandwidth(SOAPY_SDR_RX, 0, float(args.baseband_filter_hz))
-        except Exception:
-            pass
-    _apply_driver_gain(dev, args.driver, args.lna_gain_db, args.vga_gain_db)
+    for channel in _parse_rx_channels(args.rx_channels):
+        dev.setFrequency(SOAPY_SDR_RX, channel, float(args.center_freq_hz))
+        dev.setSampleRate(SOAPY_SDR_RX, channel, float(args.sample_rate_sps))
+        if args.baseband_filter_hz and args.baseband_filter_hz > 0:
+            try:
+                dev.setBandwidth(SOAPY_SDR_RX, channel, float(args.baseband_filter_hz))
+            except Exception:
+                pass
+        _apply_driver_gain(dev, args.driver, args.lna_gain_db, args.vga_gain_db, channel)
 
 
-def _setup_rx_stream(dev):
-    stream = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16)
+def _setup_rx_stream(dev, channels: list[int]):
+    stream = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, channels)
     dev.activateStream(stream)
     return stream
 
@@ -270,6 +291,7 @@ def _drain_retune_commands(commands: queue.Queue[dict], args: argparse.Namespace
     args.baseband_filter_hz = int(latest.get("baseband_filter_hz", args.baseband_filter_hz) or 0)
     args.lna_gain_db = int(latest.get("lna_gain_db", args.lna_gain_db))
     args.vga_gain_db = int(latest.get("vga_gain_db", args.vga_gain_db))
+    args.rx_channels = str(latest.get("rx_channels", args.rx_channels))
     changed_sample_rate = int(args.sample_rate_sps) != old_sample_rate
     print(
         "retune center_freq_hz=%d sample_rate_sps=%d baseband_filter_hz=%d lna=%d vga=%d"
@@ -288,26 +310,33 @@ def _drain_retune_commands(commands: queue.Queue[dict], args: argparse.Namespace
 
 def _run_rx(dev, args: argparse.Namespace) -> int:
     commands = _start_control_reader()
+    rx_channels = _parse_rx_channels(args.rx_channels)
     _apply_rx_config(dev, args)
-    stream = _setup_rx_stream(dev)
+    stream = _setup_rx_stream(dev, rx_channels)
 
     start_ts = time.time()
     max_samples = int(args.num_samples) if args.num_samples > 0 else 0
     duration_s = int(args.duration_seconds) if args.duration_seconds > 0 else 0
     produced_samples = 0
 
-    # numElems, one channel, CS16 -> int16 interleaved IQ uses 2 ints per sample.
+    # numElems per channel. Single-channel output remains int8 IQ: I,Q,I,Q...
+    # Multi-channel output is frame-interleaved: ch0_I,ch0_Q,ch1_I,ch1_Q...
     chunk_samples = 16_384
-    rx_buf = np.empty(chunk_samples * 2, dtype=np.int16)
+    rx_bufs = [np.empty(chunk_samples * 2, dtype=np.int16) for _ in rx_channels]
     out = sys.stdout.buffer
 
     try:
         while True:
             retuned, rebuild_stream = _drain_retune_commands(commands, args)
+            latest_channels = _parse_rx_channels(args.rx_channels)
+            if latest_channels != rx_channels:
+                rebuild_stream = True
             if rebuild_stream:
                 _close_rx_stream(dev, stream)
+                rx_channels = latest_channels
+                rx_bufs = [np.empty(chunk_samples * 2, dtype=np.int16) for _ in rx_channels]
                 _apply_rx_config(dev, args)
-                stream = _setup_rx_stream(dev)
+                stream = _setup_rx_stream(dev, rx_channels)
             elif retuned:
                 _apply_rx_config(dev, args)
 
@@ -322,15 +351,23 @@ def _run_rx(dev, args: argparse.Namespace) -> int:
                 if read_count <= 0:
                     break
 
-            result = dev.readStream(stream, [rx_buf], int(read_count), timeoutUs=200_000)
+            result = dev.readStream(stream, rx_bufs, int(read_count), timeoutUs=200_000)
             n = int(getattr(result, "ret", result))
             if n <= 0:
                 continue
 
-            # Convert CS16 IQ to int8 IQ expected by current gateway clients.
-            iq16 = rx_buf[: n * 2]
-            iq8 = np.clip(np.rint(iq16.astype(np.float32) / 64.0), -128, 127).astype(np.int8, copy=False)
-            out.write(iq8.tobytes())
+            converted = [
+                np.clip(np.rint(buf[: n * 2].astype(np.float32) / 64.0), -128, 127).astype(np.int8, copy=False)
+                for buf in rx_bufs
+            ]
+            if len(converted) == 1:
+                out.write(converted[0].tobytes())
+            else:
+                framed = np.empty(n * 2 * len(converted), dtype=np.int8)
+                for channel_index, iq8 in enumerate(converted):
+                    frame = iq8.reshape(n, 2)
+                    framed.reshape(n, len(converted), 2)[:, channel_index, :] = frame
+                out.write(framed.tobytes())
             produced_samples += n
     finally:
         _close_rx_stream(dev, stream)

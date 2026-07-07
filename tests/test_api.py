@@ -164,6 +164,7 @@ def test_stream_start_and_stop(client: TestClient):
         "lna_gain_db": 16,
         "vga_gain_db": 20,
         "amp_enable": False,
+        "rx_channels": [0],
     }
     started = client.post("/streams/start", headers=_auth_headers(), json=payload)
     assert started.status_code == 200
@@ -172,6 +173,22 @@ def test_stream_start_and_stop(client: TestClient):
     stopped = client.post("/streams/stream-1/stop", headers=_auth_headers())
     assert stopped.status_code == 200
     assert stopped.json() == {"ok": True}
+
+
+def test_stream_start_accepts_dual_channel_bladerf_config(client: TestClient):
+    payload = {
+        "device_id": "bladerf:0",
+        "center_freq_hz": 462_500_000,
+        "sample_rate_sps": 2_000_000,
+        "lna_gain_db": 32,
+        "vga_gain_db": 32,
+        "amp_enable": False,
+        "baseband_filter_hz": 1_500_000,
+        "rx_channels": [0, 1],
+    }
+    started = client.post("/streams/start", headers=_auth_headers(), json=payload)
+    assert started.status_code == 200
+    assert started.json()["config"]["rx_channels"] == [0, 1]
 
 
 def test_tx_start_and_stop(client: TestClient):

@@ -1374,6 +1374,13 @@ class StreamManager:
                 f"sample_rate_sps {config.sample_rate_sps} exceeds device max "
                 f"{device.max_sample_rate_sps}"
             )
+        rx_channels = list(dict.fromkeys(int(ch) for ch in (config.rx_channels or [0])))
+        if len(rx_channels) != len(config.rx_channels or []):
+            raise ValueError("rx_channels must not contain duplicates")
+        if any(ch < 0 or ch > 1 for ch in rx_channels):
+            raise ValueError("rx_channels currently supports channel 0 and/or 1")
+        if len(rx_channels) > 1 and device.driver != "bladerf":
+            raise ValueError("dual-channel RX is currently supported for bladeRF devices only")
 
     def _stream_request(self, config: StreamConfig) -> StreamRequest:
         return StreamRequest(
@@ -1384,6 +1391,7 @@ class StreamManager:
             vga_gain_db=config.vga_gain_db,
             amp_enable=config.amp_enable,
             baseband_filter_hz=config.baseband_filter_hz,
+            rx_channels=list(config.rx_channels or [0]),
             duration_seconds=config.duration_seconds,
             num_samples=config.num_samples,
         )

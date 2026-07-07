@@ -17,6 +17,7 @@ def _stream_request(device_id: str = "sdrplay:0") -> StreamRequest:
         vga_gain_db=40,
         amp_enable=False,
         baseband_filter_hz=2_000_000,
+        rx_channels=[0],
         duration_seconds=None,
         num_samples=None,
     )

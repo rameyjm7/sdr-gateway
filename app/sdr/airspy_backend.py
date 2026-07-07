@@ -63,6 +63,8 @@ class AirspyBackend(SDRBackend):
             "--vga-gain-db",
             str(request.vga_gain_db),
         ]
+        if request.rx_channels:
+            cmd.extend(["--rx-channels", ",".join(str(ch) for ch in request.rx_channels)])
         if request.baseband_filter_hz:
             cmd.extend(["--baseband-filter-hz", str(request.baseband_filter_hz)])
         if request.duration_seconds:

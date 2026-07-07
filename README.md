@@ -31,6 +31,8 @@ Primary environment variables:
 - `SDR_GATEWAY_LOG_LEVEL`: `DEBUG|INFO|WARNING|ERROR|CRITICAL` (default: `INFO`)
 - `SDR_GATEWAY_LOG_JSON`: `1/0` to enable JSON logs (default: `0`)
 - `SDR_GATEWAY_METRICS_ENABLED`: `1/0` to enable `/metrics` endpoint (default: `1`)
+- `SDR_GATEWAY_DEVICE_DISCOVERY_THREADS`: backend probe worker count for `/devices` (default: up to `8`)
+- `SDR_GATEWAY_DEVICE_CACHE_TTL_S`: seconds to cache `/devices` results; use `/devices?refresh=1` to bypass (default: `3`)
 
 See `.env.example` for a baseline local config.
 
@@ -137,6 +139,7 @@ Request observability:
 ## Core API
 
 - `GET /devices`
+- `GET /devices?refresh=1`
 - `POST /streams/start`
 - `POST /streams/{stream_id}/stop`
 - `GET /streams`
@@ -185,6 +188,40 @@ curl -s http://localhost:8080/streams/start \
     "lna_gain_db":16,
     "vga_gain_db":20,
     "amp_enable":false
+  }'
+```
+
+### Dual-channel bladeRF RX
+
+For coherent bladeRF MIMO receive, pass `rx_channels:[0,1]` to
+`POST /streams/start`. Single-channel streams keep the existing int8 IQ wire
+format:
+
+```text
+I,Q,I,Q,...
+```
+
+Dual-channel streams are frame-interleaved int8 IQ:
+
+```text
+ch0_I,ch0_Q,ch1_I,ch1_Q,ch0_I,ch0_Q,ch1_I,ch1_Q,...
+```
+
+Example:
+
+```bash
+curl -s http://localhost:8080/streams/start \
+  -H "Authorization: Bearer $SDR_GATEWAY_API_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{
+    "device_id":"bladerf:0",
+    "center_freq_hz":462500000,
+    "sample_rate_sps":2000000,
+    "baseband_filter_hz":1500000,
+    "lna_gain_db":32,
+    "vga_gain_db":32,
+    "rx_channels":[0,1],
+    "replace_existing":true
   }'
 ```
 
