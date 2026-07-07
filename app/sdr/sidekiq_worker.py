@@ -28,12 +28,13 @@ except Exception as exc:  # pragma: no cover - runtime dependency
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Sidekiq IQ streaming worker (stdout int8 IQ).")
+    p = argparse.ArgumentParser(description="Sidekiq IQ streaming worker (stdout native CS16 or int8 IQ).")
     p.add_argument("--center-freq-hz", type=int, required=True)
     p.add_argument("--sample-rate-sps", type=int, required=True)
     p.add_argument("--baseband-filter-hz", type=int, default=0)
     p.add_argument("--duration-seconds", type=int, default=0)
     p.add_argument("--num-samples", type=int, default=0)
+    p.add_argument("--iq-format", choices=("cs16", "i8"), default="cs16")
     p.add_argument("--card", type=int, default=0)
     p.add_argument("--lna-gain-db", type=int, default=0)
     p.add_argument("--vga-gain-db", type=int, default=0)

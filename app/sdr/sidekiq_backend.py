@@ -35,7 +35,7 @@ class SidekiqBackend(SDRBackend):
                     freq_min_hz=SIDEKIQ_FREQ_MIN,
                     freq_max_hz=SIDEKIQ_FREQ_MAX,
                     max_sample_rate_sps=SIDEKIQ_MAX_SAMPLE_RATE,
-                    notes="SoapySDR driver=sidekiq (CS16 native, gateway serves int8 IQ).",
+                    notes="SoapySDR driver=sidekiq (CS16 native IQ by default).",
                 )
             )
             idx += 1
@@ -64,6 +64,8 @@ class SidekiqBackend(SDRBackend):
             str(request.lna_gain_db),
             "--vga-gain-db",
             str(request.vga_gain_db),
+            "--iq-format",
+            request.iq_format,
         ]
         if request.baseband_filter_hz:
             cmd.extend(["--baseband-filter-hz", str(request.baseband_filter_hz)])

@@ -143,6 +143,7 @@ Request observability:
 - `POST /streams/start`
 - `POST /streams/{stream_id}/stop`
 - `GET /streams`
+- `POST /streams/probe`
 - `WS /ws/iq/{stream_id}`
 - `POST /tx/start`
 - `POST /tx/{tx_id}/stop`

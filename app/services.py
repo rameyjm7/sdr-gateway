@@ -60,6 +60,8 @@ WIFI_5_GHZ_HOP_CHANNELS = [
     165,
 ]
 
+logger = logging.getLogger(__name__)
+
 
 class ManagedProcess(Protocol):
     stdout: Any | None

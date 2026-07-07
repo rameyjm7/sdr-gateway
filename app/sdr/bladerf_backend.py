@@ -35,7 +35,7 @@ class BladeRFBackend(SDRBackend):
                     freq_min_hz=BLADERF_FREQ_MIN,
                     freq_max_hz=BLADERF_FREQ_MAX,
                     max_sample_rate_sps=BLADERF_MAX_SAMPLE_RATE,
-                    notes="SoapySDR driver=bladerf (CS16 native, gateway serves int8 IQ).",
+                    notes="SoapySDR driver=bladerf (CS16 native IQ by default).",
                 )
             )
         return devices
@@ -64,6 +64,8 @@ class BladeRFBackend(SDRBackend):
             str(request.lna_gain_db),
             "--vga-gain-db",
             str(request.vga_gain_db),
+            "--iq-format",
+            request.iq_format,
         ]
         if request.rx_channels:
             cmd.extend(["--rx-channels", ",".join(str(ch) for ch in request.rx_channels)])
