@@ -259,6 +259,22 @@ def _ssid_from_packet(packet: Any) -> str | None:
     return None
 
 
+def _security_from_packet(packet: Any, kind: str) -> str | None:
+    if not kind.endswith("beacon") and not kind.endswith("probe_response"):
+        return None
+    try:
+        from scapy.layers.dot11 import Dot11Beacon, Dot11ProbeResp
+    except ImportError:
+        return None
+    for layer_cls in (Dot11Beacon, Dot11ProbeResp):
+        if packet.haslayer(layer_cls):
+            cap = getattr(packet.getlayer(layer_cls), "cap", None)
+            if cap is None:
+                return None
+            return "encrypted" if bool(getattr(cap, "privacy", False)) else "open"
+    return None
+
+
 def _packet_kind(packet: Any) -> str:
     type_id = int(getattr(packet, "type", -1))
     subtype_id = int(getattr(packet, "subtype", -1))
@@ -291,6 +307,24 @@ def _packet_kind(packet: Any) -> str:
     }
     subtype_name = subtype_names.get((type_id, subtype_id), f"subtype{subtype_id}")
     return f"{type_name}.{subtype_name}"
+
+
+def _reason_code_from_packet(packet: Any, kind: str) -> int | None:
+    if not kind.endswith("deauthentication") and not kind.endswith("disassociation"):
+        return None
+    try:
+        from scapy.layers.dot11 import Dot11Deauth, Dot11Disas
+    except ImportError:
+        return None
+    for layer_cls in (Dot11Deauth, Dot11Disas):
+        if packet.haslayer(layer_cls):
+            reason = getattr(packet.getlayer(layer_cls), "reason", None)
+            if reason is not None:
+                try:
+                    return int(reason)
+                except (TypeError, ValueError):
+                    return None
+    return None
 
 
 def _event_from_scapy_packet(
@@ -337,6 +371,8 @@ def _event_from_scapy_packet(
         "rssi_dbm": rssi_dbm,
         "frequency_mhz": frequency_mhz,
         "channel": channel,
+        "reason_code": _reason_code_from_packet(packet, kind),
+        "security": _security_from_packet(packet, kind),
     }
 
 
